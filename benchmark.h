@@ -507,6 +507,7 @@ class Benchmark {
         }
 
         if (track_errors_){
+          std::cout << "Error: ";
           for (unsigned int i = 0; i < search_times_.size(); i ++){
             std::cout << "," << search_times_[i] << "," << search_latencies_[i] << "," << search_bounds_[i];
           }
