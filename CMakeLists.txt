@@ -28,12 +28,13 @@ endif ()
 
 set(SOURCE_FILES util.h)
 
-# We only include what we need for DynamicPGM, B+Tree
+# We only include what we need for DynamicPGM, B+Tree, and Hybrid
 set(BENCH_SOURCES
     "benchmarks/benchmark_dynamic_pgm.cc"
     "benchmarks/benchmark_pgm.cc"
     "benchmarks/benchmark_lipp.cc"
-    "benchmarks/benchmark_btree.cc")
+    "benchmarks/benchmark_btree.cc"
+    "benchmarks/benchmark_hybrid_pgm_lipp.cc")
 
 file(GLOB_RECURSE SEARCH_SOURCES "searches/*.h" "searches/search.cpp")
 
