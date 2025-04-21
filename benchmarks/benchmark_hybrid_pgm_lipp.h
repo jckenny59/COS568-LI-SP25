@@ -21,8 +21,7 @@ void run_hybrid_workload_benchmark(tli::Benchmark<uint64_t>& benchmark,
 // Alias the functions to maintain compatibility with existing code
 template <typename Searcher>
 void benchmark_64_hybrid_pgm_lipp(tli::Benchmark<uint64_t>& benchmark, 
-                                 bool pareto, 
-                                 const std::vector<int>& params) {
+                                 bool pareto, const std::vector<int>& params) {
     hybrid_benchmark::run_hybrid_benchmark<Searcher>(benchmark, pareto, params);
 }
 

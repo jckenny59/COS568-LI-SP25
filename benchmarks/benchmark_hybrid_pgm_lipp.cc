@@ -4,8 +4,6 @@
 #include "benchmarks/common.h"
 #include "competitors/hybrid_pgm_lipp.h"
 
-namespace hybrid_benchmark {
-
 // Benchmark function for hybrid PGM-LIPP index with configurable migration thresholds
 template <typename Searcher>
 void benchmark_64_hybrid_pgm_lipp(tli::Benchmark<uint64_t>& benchmark, 
@@ -104,8 +102,6 @@ void benchmark_64_hybrid_pgm_lipp(tli::Benchmark<uint64_t>& benchmark,
 }
 
 INSTANTIATE_TEMPLATES_MULTITHREAD(benchmark_64_hybrid_pgm_lipp, uint64_t);
-
-} // namespace hybrid_benchmark
 
 // Template instantiations
 template void hybrid_benchmark::run_hybrid_benchmark<BranchingBinarySearch<0>>(tli::Benchmark<uint64_t>&, bool, const std::vector<int>&);
