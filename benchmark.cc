@@ -49,7 +49,7 @@ using namespace std;
   }
 
 // Macro to configure all search types
-#define CONFIGURE_ALL_SEARCHES(benchmark_func, key_type, record_type, index_filter_enabled, selected_index) \
+#define CONFIGURE_ALL_SEARCHES(benchmark_func, key_type, record_type) \
   CONFIGURE_DEFAULT(benchmark_func, key_type, record_type) \
   CONFIGURE_SEARCH("binary", benchmark_func, key_type, BranchingBinarySearch<record_type>, record_type) \
   CONFIGURE_SEARCH("linear", benchmark_func, key_type, LinearSearch<record_type>, record_type) \
@@ -156,12 +156,12 @@ int main(int argc, char* argv[]) {
     case DataType::UINT64: {
       if (track_errors) {
         if (thread_count > 1) {
-          CONFIGURE_ALL_SEARCHES(run_benchmark_64, uint64_t, 2, index_filter_enabled, selected_index);
+          CONFIGURE_ALL_SEARCHES(run_benchmark_64, uint64_t, 2);
         } else {
-          CONFIGURE_ALL_SEARCHES(run_benchmark_64, uint64_t, 1, index_filter_enabled, selected_index);
+          CONFIGURE_ALL_SEARCHES(run_benchmark_64, uint64_t, 1);
         }
       } else {
-        CONFIGURE_ALL_SEARCHES(run_benchmark_64, uint64_t, 0, index_filter_enabled, selected_index);
+        CONFIGURE_ALL_SEARCHES(run_benchmark_64, uint64_t, 0);
       }
       break;
     }
@@ -169,12 +169,12 @@ int main(int argc, char* argv[]) {
     case DataType::STRING: {
       if (track_errors) {
         if (thread_count > 1) {
-          CONFIGURE_ALL_SEARCHES(run_benchmark_string, std::string, 2, index_filter_enabled, selected_index);
+          CONFIGURE_ALL_SEARCHES(run_benchmark_string, std::string, 2);
         } else {
-          CONFIGURE_ALL_SEARCHES(run_benchmark_string, std::string, 1, index_filter_enabled, selected_index);
+          CONFIGURE_ALL_SEARCHES(run_benchmark_string, std::string, 1);
         }
       } else {
-        CONFIGURE_ALL_SEARCHES(run_benchmark_string, std::string, 0, index_filter_enabled, selected_index);
+        CONFIGURE_ALL_SEARCHES(run_benchmark_string, std::string, 0);
       }
       break;
     }
