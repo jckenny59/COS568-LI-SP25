@@ -156,12 +156,12 @@ int main(int argc, char* argv[]) {
     case DataType::UINT64: {
       if (track_errors) {
         if (thread_count > 1) {
-          CONFIGURE_ALL_SEARCHES(run_benchmark_64, uint64_t, 2);
+          CONFIGURE_ALL_SEARCHES(run_benchmark_64, uint64_t, 2, index_filter_enabled, selected_index);
         } else {
-          CONFIGURE_ALL_SEARCHES(run_benchmark_64, uint64_t, 1);
+          CONFIGURE_ALL_SEARCHES(run_benchmark_64, uint64_t, 1, index_filter_enabled, selected_index);
         }
       } else {
-        CONFIGURE_ALL_SEARCHES(run_benchmark_64, uint64_t, 0);
+        CONFIGURE_ALL_SEARCHES(run_benchmark_64, uint64_t, 0, index_filter_enabled, selected_index);
       }
       break;
     }
@@ -169,12 +169,12 @@ int main(int argc, char* argv[]) {
     case DataType::STRING: {
       if (track_errors) {
         if (thread_count > 1) {
-          CONFIGURE_ALL_SEARCHES(run_benchmark_string, std::string, 2);
+          CONFIGURE_ALL_SEARCHES(run_benchmark_string, std::string, 2, index_filter_enabled, selected_index);
         } else {
-          CONFIGURE_ALL_SEARCHES(run_benchmark_string, std::string, 1);
+          CONFIGURE_ALL_SEARCHES(run_benchmark_string, std::string, 1, index_filter_enabled, selected_index);
         }
       } else {
-        CONFIGURE_ALL_SEARCHES(run_benchmark_string, std::string, 0);
+        CONFIGURE_ALL_SEARCHES(run_benchmark_string, std::string, 0, index_filter_enabled, selected_index);
       }
       break;
     }
