@@ -46,6 +46,7 @@ using namespace std;
     break;                                                    \
   }
 
+
 #define add_search_types(func, type, record) \
   add_default(func, type, record) \
   add_search_type("binary", func, type, BranchingBinarySearch<record>, record);                           \
