@@ -180,5 +180,13 @@ int main(int argc, char* argv[]) {
     }
   }
 
+  // Update the macro calls to include all required parameters
+  CONFIGURE_ALL_SEARCHES(run_benchmark_64, uint64_t, 2, false, 0);
+  CONFIGURE_ALL_SEARCHES(run_benchmark_64, uint64_t, 2, true, 0);
+  CONFIGURE_ALL_SEARCHES(run_benchmark_64, uint64_t, 2, false, 1);
+  CONFIGURE_ALL_SEARCHES(run_benchmark_64, uint64_t, 2, true, 1);
+  CONFIGURE_ALL_SEARCHES(run_benchmark_64, uint64_t, 2, false, 2);
+  CONFIGURE_ALL_SEARCHES(run_benchmark_64, uint64_t, 2, true, 2);
+
   return 0;
 }
