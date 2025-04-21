@@ -116,5 +116,13 @@ void benchmark_64_hybrid_pgm_lipp(tli::Benchmark<uint64_t>& benchmark,
     hybrid_benchmark::run_hybrid_workload_benchmark<record>(benchmark, filename);
 }
 
-// Template instantiations
-INSTANTIATE_TEMPLATES_MULTITHREAD(benchmark_64_hybrid_pgm_lipp, uint64_t); 
+// Explicit template instantiations for different search types
+template void benchmark_64_hybrid_pgm_lipp<BranchingBinarySearch<uint64_t>>(tli::Benchmark<uint64_t>&, bool, const std::vector<int>&);
+template void benchmark_64_hybrid_pgm_lipp<LinearSearch<uint64_t>>(tli::Benchmark<uint64_t>&, bool, const std::vector<int>&);
+template void benchmark_64_hybrid_pgm_lipp<InterpolationSearch<uint64_t>>(tli::Benchmark<uint64_t>&, bool, const std::vector<int>&);
+template void benchmark_64_hybrid_pgm_lipp<ExponentialSearch<uint64_t>>(tli::Benchmark<uint64_t>&, bool, const std::vector<int>&);
+
+// Template instantiations for record types
+template void benchmark_64_hybrid_pgm_lipp<0>(tli::Benchmark<uint64_t>&, const std::string&);
+template void benchmark_64_hybrid_pgm_lipp<1>(tli::Benchmark<uint64_t>&, const std::string&);
+template void benchmark_64_hybrid_pgm_lipp<2>(tli::Benchmark<uint64_t>&, const std::string&); 
