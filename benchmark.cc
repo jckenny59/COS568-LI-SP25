@@ -79,7 +79,7 @@ void execute_64_bit(tli::Benchmark<uint64_t>& benchmark, bool only_mode,
   check_only("BTree", benchmark_64_btree<record>(benchmark, filename));
   check_only("DynamicPGM", benchmark_64_dynamic_pgm<record>(benchmark, filename));
   check_only("LIPP", benchmark_64_lipp(benchmark));
-  check_only("HybridPGMLIPP", benchmark_64_hybrid_pgm_lipp<record>(benchmark, false, std::vector<int>()));
+  check_only("HybridPGMLIPP", benchmark_64_hybrid_pgm_lipp<record>(benchmark, false, std::vector<int>(), only_mode, only, filename));
 }
 
 // We don't do string benchmarks in this minimal build
