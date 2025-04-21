@@ -34,6 +34,7 @@ template void benchmark_64_hybrid_pgm_lipp<LinearSearch<0>>(tli::Benchmark<uint6
 template void benchmark_64_hybrid_pgm_lipp<BranchingBinarySearch<0>>(tli::Benchmark<uint64_t>&, bool, const std::vector<int>&);
 template void benchmark_64_hybrid_pgm_lipp<InterpolationSearch<0>>(tli::Benchmark<uint64_t>&, bool, const std::vector<int>&);
 template void benchmark_64_hybrid_pgm_lipp<ExponentialSearch<0>>(tli::Benchmark<uint64_t>&, bool, const std::vector<int>&);
+template void benchmark_64_hybrid_pgm_lipp<LinearAVX<uint64_t, 0>>(tli::Benchmark<uint64_t>&, bool, const std::vector<int>&);
 template void benchmark_64_hybrid_pgm_lipp<0>(tli::Benchmark<uint64_t>&, const std::string&);
 
 // Template instantiations for record=1
@@ -41,6 +42,7 @@ template void benchmark_64_hybrid_pgm_lipp<LinearSearch<1>>(tli::Benchmark<uint6
 template void benchmark_64_hybrid_pgm_lipp<BranchingBinarySearch<1>>(tli::Benchmark<uint64_t>&, bool, const std::vector<int>&);
 template void benchmark_64_hybrid_pgm_lipp<InterpolationSearch<1>>(tli::Benchmark<uint64_t>&, bool, const std::vector<int>&);
 template void benchmark_64_hybrid_pgm_lipp<ExponentialSearch<1>>(tli::Benchmark<uint64_t>&, bool, const std::vector<int>&);
+template void benchmark_64_hybrid_pgm_lipp<LinearAVX<uint64_t, 1>>(tli::Benchmark<uint64_t>&, bool, const std::vector<int>&);
 template void benchmark_64_hybrid_pgm_lipp<1>(tli::Benchmark<uint64_t>&, const std::string&);
 
 // Template instantiations for record=2
@@ -48,4 +50,5 @@ template void benchmark_64_hybrid_pgm_lipp<LinearSearch<2>>(tli::Benchmark<uint6
 template void benchmark_64_hybrid_pgm_lipp<BranchingBinarySearch<2>>(tli::Benchmark<uint64_t>&, bool, const std::vector<int>&);
 template void benchmark_64_hybrid_pgm_lipp<InterpolationSearch<2>>(tli::Benchmark<uint64_t>&, bool, const std::vector<int>&);
 template void benchmark_64_hybrid_pgm_lipp<ExponentialSearch<2>>(tli::Benchmark<uint64_t>&, bool, const std::vector<int>&);
+template void benchmark_64_hybrid_pgm_lipp<LinearAVX<uint64_t, 2>>(tli::Benchmark<uint64_t>&, bool, const std::vector<int>&);
 template void benchmark_64_hybrid_pgm_lipp<2>(tli::Benchmark<uint64_t>&, const std::string&); 
