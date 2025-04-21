@@ -22,66 +22,72 @@ using namespace std;
 
 // If only_mode is true (i.e., user passed --only=PGM or BTree),
 // then run 'code' only if "tag" matches the given index name.
-#define RUN_IF_SELECTED(tag, code) \
+#define check_only(tag, code) \
   if (!only_mode || (only == (tag))) { \
     code;                              \
   }
 
-#define CONFIGURE_SEARCH(name, func, type, search_class, record)                                           \
+#define add_search_type(name, func, type, search_class, record)                                           \
   if (search_type == (name) ) {                                                                           \
     tli::Benchmark<type> benchmark(                                                                      \
         filename, ops, num_repeats, through, build, fence, cold_cache,                                    \
         track_errors, csv, num_threads, verify);                                                          \
-    func<search_class, record>(benchmark, pareto, params);                                                \
+    func<search_class, record>(benchmark, pareto, params, only_mode, only, filename);                     \
     break;                                                                                                \
   }
 
 // The "default" macro calls your function but no "search_class".
-#define CONFIGURE_DEFAULT(func, type, record)                       \
+#define add_default(func, type, record)                       \
   if (!pareto && params.empty()) {                            \
     tli::Benchmark<type> benchmark(                           \
         filename, ops, num_repeats, through, build, fence,    \
         cold_cache, track_errors, csv, num_threads, verify);  \
-    func<record>(benchmark, filename);                        \
+    func<record>(benchmark, only_mode, only, ops);            \
     break;                                                    \
   }
 
-#define CONFIGURE_ALL_SEARCHES(func, type, record) \
-  CONFIGURE_DEFAULT(func, type, record) \
-  CONFIGURE_SEARCH("binary", func, type, BranchingBinarySearch<record>, record);                           \
-  CONFIGURE_SEARCH("linear", func, type, LinearSearch<record>, record);                                    \
-  CONFIGURE_SEARCH("avx", func, type, LinearAVX<type COMMA record>, record);                               \
-  CONFIGURE_SEARCH("interpolation", func, type, InterpolationSearch<record>, record);                      \
-  CONFIGURE_SEARCH("exponential", func, type, ExponentialSearch<record>, record);
+#define add_search_types(func, type, record) \
+  add_default(func, type, record) \
+  add_search_type("binary", func, type, BranchingBinarySearch<record>, record);                           \
+  add_search_type("linear", func, type, LinearSearch<record>, record);                                    \
+  add_search_type("avx", func, type, LinearAVX<type COMMA record>, record);                               \
+  add_search_type("interpolation", func, type, InterpolationSearch<record>, record);                      \
+  add_search_type("exponential", func, type, ExponentialSearch<record>, record);
 
 // 1) Overload that passes a specific search class
 template <class SearchClass, int record>
-void run_benchmark_64(tli::Benchmark<uint64_t>& benchmark, bool pareto,
-                    const std::vector<int>& params) 
+void execute_64_bit(tli::Benchmark<uint64_t>& benchmark, bool pareto,
+                    const std::vector<int>& params, bool only_mode,
+                    const std::string& only, const std::string& /*filename*/) 
 {
-  RUN_IF_SELECTED("PGM", benchmark_64_pgm<SearchClass>(benchmark, pareto, params));
-  RUN_IF_SELECTED("BTree", benchmark_64_btree<SearchClass>(benchmark, pareto, params));
-  RUN_IF_SELECTED("DynamicPGM", benchmark_64_dynamic_pgm<SearchClass>(benchmark, pareto, params));
-  RUN_IF_SELECTED("LIPP", benchmark_64_lipp(benchmark));
-  RUN_IF_SELECTED("HybridPGMLIPP", benchmark_64_hybrid_pgm_lipp<SearchClass>(benchmark, pareto, params));
+  // Only run if user specifies --only=PGM or --only=BTree.
+  check_only("PGM", benchmark_64_pgm<SearchClass>(benchmark, pareto, params));
+  check_only("BTree", benchmark_64_btree<SearchClass>(benchmark, pareto, params));
+  check_only("DynamicPGM", benchmark_64_dynamic_pgm<SearchClass>(benchmark, pareto, params));
+  check_only("LIPP", benchmark_64_lipp(benchmark));
+  check_only("HybridPGMLIPP", benchmark_64_hybrid_pgm_lipp<SearchClass>(benchmark, pareto, params));
 }
 
 // 2) Overload that doesn't pass a search class
 template <int record>
-void run_benchmark_64(tli::Benchmark<uint64_t>& benchmark, const std::string& filename)
+void execute_64_bit(tli::Benchmark<uint64_t>& benchmark, bool only_mode,
+                    const std::string& only, const std::string& filename)
 {
-  RUN_IF_SELECTED("PGM", benchmark_64_pgm<record>(benchmark, filename));
-  RUN_IF_SELECTED("BTree", benchmark_64_btree<record>(benchmark, filename));
-  RUN_IF_SELECTED("DynamicPGM", benchmark_64_dynamic_pgm<record>(benchmark, filename));
-  RUN_IF_SELECTED("LIPP", benchmark_64_lipp(benchmark));
-  RUN_IF_SELECTED("HybridPGMLIPP", benchmark_64_hybrid_pgm_lipp<record>(benchmark, filename));
+  // Only run if user specifies --only=PGM or --only=BTree
+  check_only("PGM", benchmark_64_pgm<record>(benchmark, filename));
+  check_only("BTree", benchmark_64_btree<record>(benchmark, filename));
+  check_only("DynamicPGM", benchmark_64_dynamic_pgm<record>(benchmark, filename));
+  check_only("LIPP", benchmark_64_lipp(benchmark));
+  check_only("HybridPGMLIPP", benchmark_64_hybrid_pgm_lipp<record>(benchmark, filename));
 }
 
 // We don't do string benchmarks in this minimal build
 template <class SearchClass, int record>
-void run_benchmark_string(tli::Benchmark<std::string>&, bool, const std::vector<int>&) {}
+void execute_string(tli::Benchmark<std::string>&, bool, const std::vector<int>&,
+                    bool, const std::string&, const std::string&) {}
 template <int record>
-void run_benchmark_string(tli::Benchmark<std::string>&, const std::string&) {}
+void execute_string(tli::Benchmark<std::string>&, bool,
+                    const std::string&, const std::string&) {}
 
 int main(int argc, char* argv[]) {
   cxxopts::Options options("benchmark", "Searching on sorted data benchmark");
@@ -152,13 +158,13 @@ int main(int argc, char* argv[]) {
       // Create benchmark.
       if (track_errors){
         if (num_threads > 1){
-          CONFIGURE_ALL_SEARCHES(run_benchmark_64, uint64_t, 2);
+          add_search_types(execute_64_bit, uint64_t, 2);
         } else {
-          CONFIGURE_ALL_SEARCHES(run_benchmark_64, uint64_t, 1);
+          add_search_types(execute_64_bit, uint64_t, 1);
         }
       }
       else{
-        CONFIGURE_ALL_SEARCHES(run_benchmark_64, uint64_t, 0);
+        add_search_types(execute_64_bit, uint64_t, 0);
       }
       break;
     }
@@ -167,13 +173,13 @@ int main(int argc, char* argv[]) {
       // Create benchmark.
       if (track_errors){
         if (num_threads > 1){
-          CONFIGURE_ALL_SEARCHES(run_benchmark_string, std::string, 2);
+          add_search_types(execute_string, std::string, 2);
         } else{
-          CONFIGURE_ALL_SEARCHES(run_benchmark_string, std::string, 1);
+          add_search_types(execute_string, std::string, 1);
         }
       }
       else{
-        CONFIGURE_ALL_SEARCHES(run_benchmark_string, std::string, 0);
+        add_search_types(execute_string, std::string, 0);
       }
       break;
     }
