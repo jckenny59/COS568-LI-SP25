@@ -116,13 +116,5 @@ void benchmark_64_hybrid_pgm_lipp(tli::Benchmark<uint64_t>& benchmark,
     hybrid_benchmark::run_hybrid_workload_benchmark<record>(benchmark, filename);
 }
 
-// Template instantiations
-template void benchmark_64_hybrid_pgm_lipp<BranchingBinarySearch<0>>(tli::Benchmark<uint64_t>&, bool, const std::vector<int>&);
-template void benchmark_64_hybrid_pgm_lipp<BranchingBinarySearch<1>>(tli::Benchmark<uint64_t>&, bool, const std::vector<int>&);
-template void benchmark_64_hybrid_pgm_lipp<BranchingBinarySearch<2>>(tli::Benchmark<uint64_t>&, bool, const std::vector<int>&);
-
-template void benchmark_64_hybrid_pgm_lipp<0>(tli::Benchmark<uint64_t>&, const std::string&);
-template void benchmark_64_hybrid_pgm_lipp<1>(tli::Benchmark<uint64_t>&, const std::string&);
-template void benchmark_64_hybrid_pgm_lipp<2>(tli::Benchmark<uint64_t>&, const std::string&);
-
+// Remove explicit template instantiations and use macro instead
 INSTANTIATE_TEMPLATES_MULTITHREAD(benchmark_64_hybrid_pgm_lipp, uint64_t); 
