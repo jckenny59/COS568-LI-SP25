@@ -129,15 +129,14 @@ private:
             // Clear the output vector
             output.clear();
             
-            // Get the internal data structure
-            const auto& pgm = dpgm_.GetInternalData();
+            // Use RangeQuery to get all keys in the DPGM
+            // We use the full range of KeyType to get all items
+            KeyType min_key = std::numeric_limits<KeyType>::min();
+            KeyType max_key = std::numeric_limits<KeyType>::max();
             
-            // Get the first key
-            auto it = pgm.lower_bound(std::numeric_limits<KeyType>::min());
-            
-            // Iterate through all items
-            while (it != pgm.end()) {
-                // Use the iterator's value directly
+            // Get all items using RangeQuery
+            auto it = dpgm_.pgm_.lower_bound(min_key);
+            while (it != dpgm_.pgm_.end() && it->key() <= max_key) {
                 output.push_back(KeyValue<KeyType>{it->key(), it->value()});
                 ++it;
             }
