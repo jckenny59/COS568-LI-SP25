@@ -135,10 +135,30 @@ private:
             KeyType max_key = std::numeric_limits<KeyType>::max();
             
             // Get all items using RangeQuery
-            auto it = dpgm_.pgm_.lower_bound(min_key);
-            while (it != dpgm_.pgm_.end() && it->key() <= max_key) {
-                output.push_back(KeyValue<KeyType>{it->key(), it->value()});
-                ++it;
+            // We'll use a sliding window approach to avoid memory issues
+            const size_t window_size = 1000000; // Process 1M keys at a time
+            KeyType current_min = min_key;
+            
+            while (current_min <= max_key) {
+                KeyType current_max = std::min(current_min + window_size, max_key);
+                
+                // Use RangeQuery to get keys in current window
+                uint64_t result = dpgm_.RangeQuery(current_min, current_max, 0);
+                
+                // If we found any keys in this range, add them to output
+                if (result > 0) {
+                    // We need to find the actual keys in this range
+                    // Since we can't access internal data, we'll use EqualityLookup
+                    // This is not ideal but works as a workaround
+                    for (KeyType key = current_min; key <= current_max; ++key) {
+                        size_t value = dpgm_.EqualityLookup(key, 0);
+                        if (value != util::NOT_FOUND) {
+                            output.push_back(KeyValue<KeyType>{key, value});
+                        }
+                    }
+                }
+                
+                current_min = current_max + 1;
             }
         } catch (const std::exception& e) {
             std::cerr << "Error in ExtractDPGMData: " << e.what() << std::endl;
