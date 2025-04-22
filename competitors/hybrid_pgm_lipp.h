@@ -1,45 +1,174 @@
 #pragma once
 
+#include <algorithm>
+#include <cstdlib>
+#include <iostream>
+#include <vector>
+#include <mutex>
 #include <thread>
 #include <atomic>
-#include <mutex>
-#include <condition_variable>
+#include <queue>
+#include <limits>
+#include <chrono>
 
+#include "../util.h"
+#include "base.h"
 #include "dynamic_pgm_index.h"
-#include "lipp_index.h"
+#include "lipp.h"
 
-template<typename Key, typename Payload>
-class HybridPgmLipp {
+template <class KeyType, class SearchClass, size_t pgm_error>
+class HybridPGMLIPP : public Base<KeyType> {
 public:
-  struct Config {
-    size_t flush_threshold;       // e.g. 5% of expected total keys
-    bool   async_flush = false;   // use background thread?
-    // You can also embed sub-configs if needed:
-    // typename DynamicPgmIndex<Key,Payload>::Config pgm_cfg;
-    // typename LippIndex<Key,Payload>::Config   lipp_cfg;
-  };
+    HybridPGMLIPP(const std::vector<int>& params) 
+        : dpgm_(params), lipp_(params), migration_threshold_(0.05), 
+          migration_in_progress_(false), migration_queue_size_(0) {
+        if (!params.empty()) {
+            migration_threshold_ = params[0] / 100.0; // Convert percentage to decimal
+        }
+    }
 
-  explicit HybridPgmLipp(const Config& cfg);
-  ~HybridPgmLipp();
+    uint64_t Build(const std::vector<KeyValue<KeyType>>& data, size_t num_threads) {
+        // Initially load all data into LIPP
+        return lipp_.Build(data, num_threads);
+    }
 
-  void insert(const Key& k, const Payload& v);
-  bool find(const Key& k, Payload& out) const;
+    size_t EqualityLookup(const KeyType& lookup_key, uint32_t thread_id) const {
+        // First check DPGM
+        size_t dpgm_result = dpgm_.EqualityLookup(lookup_key, thread_id);
+        if (dpgm_result != util::NOT_FOUND) {
+            return dpgm_result;
+        }
+        
+        // If not found in DPGM, check LIPP
+        return lipp_.EqualityLookup(lookup_key, thread_id);
+    }
+
+    uint64_t RangeQuery(const KeyType& lower_key, const KeyType& upper_key, uint32_t thread_id) const {
+        // Combine results from both indexes
+        uint64_t dpgm_result = dpgm_.RangeQuery(lower_key, upper_key, thread_id);
+        uint64_t lipp_result = lipp_.RangeQuery(lower_key, upper_key, thread_id);
+        return dpgm_result + lipp_result;
+    }
+
+    void Insert(const KeyValue<KeyType>& data, uint32_t thread_id) {
+        // First insert into DPGM without lock
+        dpgm_.Insert(data, thread_id);
+        
+        // Check migration threshold periodically
+        static size_t insert_count = 0;
+        if (++insert_count % 100000 == 0) {  // Check every 100000 inserts
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (dpgm_.size() > migration_threshold_ * (dpgm_.size() + lipp_.size())) {
+                if (!migration_in_progress_.load()) {
+                    StartAsyncMigration();
+                }
+            }
+        }
+    }
+
+    std::string name() const { return "HybridPGMLIPP"; }
+
+    std::size_t size() const { return dpgm_.size() + lipp_.size(); }
+
+    bool applicable(bool unique, bool range_query, bool insert, bool multithread, 
+                   const std::string& ops_filename) const {
+        return unique && !multithread;
+    }
+
+    std::vector<std::string> variants() const { 
+        std::vector<std::string> vec;
+        vec.push_back(SearchClass::name());
+        vec.push_back(std::to_string(pgm_error));
+        vec.push_back(std::to_string(static_cast<int>(migration_threshold_ * 100)));
+        return vec;
+    }
 
 private:
-  void flush();       // migrate from DPGM → LIPP
-  void maybe_flush(); // check threshold and trigger flush
+    void StartAsyncMigration() {
+        // Don't start a new migration if one is already in progress
+        bool expected = false;
+        if (!migration_in_progress_.compare_exchange_strong(expected, true)) {
+            return;
+        }
+        
+        std::thread migration_thread([this]() {
+            MigrateDPGMToLIPP();
+            migration_in_progress_.store(false);
+        });
+        migration_thread.detach();
+    }
 
-  DynamicPgmIndex<Key,Payload> _dpgm;
-  LippIndex<Key,Payload>       _lipp;
-  Config                       _cfg;
-  size_t                       _dpgm_count = 0;
+    void MigrateDPGMToLIPP() {
+        // Extract all data from DPGM
+        std::vector<KeyValue<KeyType>> dpgm_data;
+        ExtractDPGMData(dpgm_data);
+        
+        if (dpgm_data.empty()) {
+            migration_in_progress_.store(false);
+            return;
+        }
+        
+        // Sort the data for efficient bulk loading
+        std::sort(dpgm_data.begin(), dpgm_data.end(), 
+                  [](const KeyValue<KeyType>& a, const KeyValue<KeyType>& b) {
+                    return a.key < b.key;
+                  });
+        
+        // Bulk load into LIPP
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            lipp_.Build(dpgm_data, 1); // Use single thread for migration
+            
+            // Clear DPGM by creating a new empty instance
+            dpgm_ = DynamicPGM<KeyType, SearchClass, pgm_error>(std::vector<int>());
+        }
+    }
 
-  // for async flush:
-  std::thread                 _flusher;
-  std::atomic<bool>           _stop_flag{false};
-  mutable std::mutex          _mtx;
-  std::condition_variable     _cv;
-};
+    void ExtractDPGMData(std::vector<KeyValue<KeyType>>& output) {
+        try {
+            // Clear the output vector
+            output.clear();
+            
+            // Use RangeQuery to get all keys in the DPGM
+            // We use the full range of KeyType to get all items
+            KeyType min_key = std::numeric_limits<KeyType>::min();
+            KeyType max_key = std::numeric_limits<KeyType>::max();
+            
+            // Get all items using RangeQuery
+            // We'll use a sliding window approach to avoid memory issues
+            const size_t window_size = 1000000; // Process 1M keys at a time
+            KeyType current_min = min_key;
+            
+            while (current_min <= max_key) {
+                KeyType current_max = std::min(current_min + window_size, max_key);
+                
+                // Use RangeQuery to get keys in current window
+                uint64_t result = dpgm_.RangeQuery(current_min, current_max, 0);
+                
+                // If we found any keys in this range, add them to output
+                if (result > 0) {
+                    // We need to find the actual keys in this range
+                    // Since we can't access internal data, we'll use EqualityLookup
+                    // This is not ideal but works as a workaround
+                    for (KeyType key = current_min; key <= current_max; ++key) {
+                        size_t value = dpgm_.EqualityLookup(key, 0);
+                        if (value != util::NOT_FOUND) {
+                            output.push_back(KeyValue<KeyType>{key, value});
+                        }
+                    }
+                }
+                
+                current_min = current_max + 1;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error in ExtractDPGMData: " << e.what() << std::endl;
+        }
+    }
 
-// Include the template implementations
-#include "hybrid_pgm_lipp.cc"
+    DynamicPGM<KeyType, SearchClass, pgm_error> dpgm_;
+    Lipp<KeyType> lipp_;
+    double migration_threshold_;
+    std::mutex mutex_;
+    std::atomic<bool> migration_in_progress_;
+    std::atomic<size_t> migration_queue_size_;
+}; 

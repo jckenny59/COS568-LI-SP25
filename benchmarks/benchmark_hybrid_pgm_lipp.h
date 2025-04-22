@@ -1,21 +1,28 @@
 #pragma once
 
 #include "benchmark.h"
-#include "hybrid_pgm_lipp.h"
 
-template<typename Key, typename Payload>
-class BenchmarkHybridPgmLipp : public Benchmark<Key, Payload> {
-public:
-  explicit BenchmarkHybridPgmLipp(const std::string& dataset, const std::string& workload)
-      : Benchmark<Key, Payload>(dataset, workload) {}
+// Forward declarations for hybrid PGM-LIPP benchmark functions
+namespace hybrid_benchmark {
 
-  void init() override {
-    typename HybridPgmLipp<Key, Payload>::Config cfg;
-    cfg.flush_threshold = 100000; // Example threshold
-    cfg.async_flush = false;      // Start with synchronous flush
-    _index = std::make_unique<HybridPgmLipp<Key, Payload>>(cfg);
-  }
+// Benchmark function for hybrid index with configurable parameters
+template <typename SearchStrategy>
+void run_hybrid_benchmark(tli::Benchmark<uint64_t>& benchmark, 
+                         bool pareto_mode, 
+                         const std::vector<int>& parameters);
 
-private:
-  std::unique_ptr<HybridPgmLipp<Key, Payload>> _index;
-}; 
+// Benchmark function for specific record type and workload
+template <int RecordType>
+void run_hybrid_workload_benchmark(tli::Benchmark<uint64_t>& benchmark, 
+                                  const std::string& workload_file);
+
+} // namespace hybrid_benchmark
+
+// Function declarations
+template <typename Searcher>
+void benchmark_64_hybrid_pgm_lipp(tli::Benchmark<uint64_t>& benchmark, 
+                                 bool pareto, const std::vector<int>& params);
+
+template <int record>
+void benchmark_64_hybrid_pgm_lipp(tli::Benchmark<uint64_t>& benchmark, 
+                                 const std::string& filename); 

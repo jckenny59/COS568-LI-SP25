@@ -2,11 +2,12 @@
 
 #include <cstdlib>
 
-// Keep only PGM and B+Tree includes
+// Core benchmark implementations
 #include "benchmarks/benchmark_btree.h"
 #include "benchmarks/benchmark_pgm.h"
 #include "benchmarks/benchmark_dynamic_pgm.h"
 #include "benchmarks/benchmark_lipp.h"
+#include "benchmarks/benchmark_hybrid_pgm_lipp.h"
 
 #include "searches/linear_search.h"
 #include "searches/linear_search_avx.h"
@@ -14,83 +15,86 @@
 #include "searches/exponential_search.h"
 #include "searches/interpolation_search.h"
 
-#include "util.h"           // for util::resolve_type
-#include "utils/cxxopts.hpp" // for command-line options
+#include "util.h"
+#include "utils/cxxopts.hpp"
+
 #define COMMA ,
 using namespace std;
 
-// If only_mode is true (i.e., user passed --only=PGM or BTree),
+// If selection_mode is true (i.e., user passed --only=PGM or BTree),
 // then run 'code' only if "tag" matches the given index name.
-#define check_only(tag, code) \
-  if (!only_mode || (only == (tag))) { \
+#define execute_if_selected(tag, code) \
+  if (!selection_mode || (selected_index == (tag))) { \
     code;                              \
   }
 
-#define add_search_type(name, func, type, search_class, record)                                           \
-  if (search_type == (name) ) {                                                                           \
-    tli::Benchmark<type> benchmark(                                                                      \
-        filename, ops, num_repeats, through, build, fence, cold_cache,                                    \
-        track_errors, csv, num_threads, verify);                                                          \
-    func<search_class, record>(benchmark, pareto, params, only_mode, only, filename);                     \
+#define configure_search_implementation(name, func, type, search_class, record)                                           \
+  if (search_algorithm == (name) ) {                                                                           \
+    tli::Benchmark<type> benchmark_config(                                                                      \
+        filename, operations, repetition_count, throughput_mode, build_phase, memory_fence, cache_clear,                                    \
+        error_tracking, csv_output, thread_count, verification_mode);                                                          \
+    func<search_class, record>(benchmark_config, pareto_analysis, configuration_params, selection_mode, selected_index, filename);                     \
     break;                                                                                                \
   }
 
 // The "default" macro calls your function but no "search_class".
-#define add_default(func, type, record)                       \
-  if (!pareto && params.empty()) {                            \
-    tli::Benchmark<type> benchmark(                           \
-        filename, ops, num_repeats, through, build, fence,    \
-        cold_cache, track_errors, csv, num_threads, verify);  \
-    func<record>(benchmark, only_mode, only, ops);            \
+#define setup_default_benchmark(func, type, record)                       \
+  if (!pareto_analysis && configuration_params.empty()) {                            \
+    tli::Benchmark<type> benchmark_config(                           \
+        filename, operations, repetition_count, throughput_mode, build_phase, memory_fence,    \
+        cache_clear, error_tracking, csv_output, thread_count, verification_mode);  \
+    func<record>(benchmark_config, selection_mode, selected_index, operations);            \
     break;                                                    \
   }
 
 
 #define add_search_types(func, type, record) \
-  add_default(func, type, record) \
-  add_search_type("binary", func, type, BranchingBinarySearch<record>, record);                           \
-  add_search_type("linear", func, type, LinearSearch<record>, record);                                    \
-  add_search_type("avx", func, type, LinearAVX<type COMMA record>, record);                               \
-  add_search_type("interpolation", func, type, InterpolationSearch<record>, record);                      \
-  add_search_type("exponential", func, type, ExponentialSearch<record>, record);
+  setup_default_benchmark(func, type, record) \
+  configure_search_implementation("binary", func, type, BranchingBinarySearch<record>, record);                           \
+  configure_search_implementation("linear", func, type, LinearSearch<record>, record);                                    \
+  configure_search_implementation("avx", func, type, LinearAVX<type COMMA record>, record);                               \
+  configure_search_implementation("interpolation", func, type, InterpolationSearch<record>, record);                      \
+  configure_search_implementation("exponential", func, type, ExponentialSearch<record>, record);
 
 // 1) Overload that passes a specific search class
 template <class SearchClass, int record>
-void execute_64_bit(tli::Benchmark<uint64_t>& benchmark, bool pareto,
-                    const std::vector<int>& params, bool only_mode,
-                    const std::string& only, const std::string& /*filename*/) 
+void run_uint64_benchmark(tli::Benchmark<uint64_t>& benchmark_config, bool pareto_analysis,
+                    const std::vector<int>& configuration_params, bool selection_mode,
+                    const std::string& selected_index, const std::string& /*filename*/) 
 {
   // Only run if user specifies --only=PGM or --only=BTree.
-  check_only("PGM", benchmark_64_pgm<SearchClass>(benchmark, pareto, params));
-  check_only("BTree", benchmark_64_btree<SearchClass>(benchmark, pareto, params));
-  check_only("DynamicPGM", benchmark_64_dynamic_pgm<SearchClass>(benchmark, pareto, params));
-  check_only("LIPP", benchmark_64_lipp(benchmark));
+  execute_if_selected("PGM", benchmark_64_pgm<SearchClass>(benchmark_config, pareto_analysis, configuration_params));
+  execute_if_selected("BTree", benchmark_64_btree<SearchClass>(benchmark_config, pareto_analysis, configuration_params));
+  execute_if_selected("DynamicPGM", benchmark_64_dynamic_pgm<SearchClass>(benchmark_config, pareto_analysis, configuration_params));
+  execute_if_selected("LIPP", benchmark_64_lipp(benchmark_config));
+  execute_if_selected("HybridPGMLIPP", benchmark_64_hybrid_pgm_lipp<SearchClass>(benchmark_config, pareto_analysis, configuration_params));
 }
 
 // 2) Overload that doesn't pass a search class
 template <int record>
-void execute_64_bit(tli::Benchmark<uint64_t>& benchmark, bool only_mode,
-                    const std::string& only, const std::string& filename)
+void run_uint64_benchmark(tli::Benchmark<uint64_t>& benchmark_config, bool selection_mode,
+                    const std::string& selected_index, const std::string& filename)
 {
   // Only run if user specifies --only=PGM or --only=BTree
-  check_only("PGM", benchmark_64_pgm<record>(benchmark, filename));
-  check_only("BTree", benchmark_64_btree<record>(benchmark, filename));
-  check_only("DynamicPGM", benchmark_64_dynamic_pgm<record>(benchmark, filename));
-  check_only("LIPP", benchmark_64_lipp(benchmark));
+  execute_if_selected("PGM", benchmark_64_pgm<record>(benchmark_config, filename));
+  execute_if_selected("BTree", benchmark_64_btree<record>(benchmark_config, filename));
+  execute_if_selected("DynamicPGM", benchmark_64_dynamic_pgm<record>(benchmark_config, filename));
+  execute_if_selected("LIPP", benchmark_64_lipp(benchmark_config));
+  execute_if_selected("HybridPGMLIPP", benchmark_64_hybrid_pgm_lipp<record>(benchmark_config, filename));
 }
 
 // We don't do string benchmarks in this minimal build
 template <class SearchClass, int record>
-void execute_string(tli::Benchmark<std::string>&, bool, const std::vector<int>&,
+void run_string_benchmark(tli::Benchmark<std::string>&, bool, const std::vector<int>&,
                     bool, const std::string&, const std::string&) {}
 template <int record>
-void execute_string(tli::Benchmark<std::string>&, bool,
+void run_string_benchmark(tli::Benchmark<std::string>&, bool,
                     const std::string&, const std::string&) {}
 
-int main(int argc, char* argv[]) {
-  cxxopts::Options options("benchmark", "Searching on sorted data benchmark");
-  options.positional_help("<data> <ops>");
-  options.add_options()
+int benchmark_main(int argc, char* argv[]) {
+  cxxopts::Options cli_options("benchmark", "Searching on sorted data benchmark");
+  cli_options.positional_help("<data> <ops>");
+  cli_options.add_options()
     ("data", "Data file with keys", cxxopts::value<std::string>())
     ("ops", "Workload file with operations", cxxopts::value<std::string>())
     ("help", "Displays help")
@@ -109,75 +113,75 @@ int main(int argc, char* argv[]) {
        cxxopts::value<std::string>()->default_value("binary"))
     ("params", "Set parameters of index", cxxopts::value<std::vector<int>>()->default_value(""));
 
-  options.parse_positional({"data", "ops"});
+  cli_options.parse_positional({"data", "ops"});
 
-  auto result = options.parse(argc, argv);
+  auto cli_result = cli_options.parse(argc, argv);
 
-  if (result.count("help")) {
-    std::cout << options.help({}) << "\n";
+  if (cli_result.count("help")) {
+    std::cout << cli_options.help({}) << "\n";
     return 0;
   }
 
-  bool through = result.count("through");
-  size_t num_repeats = through ? result["repeats"].as<int>() : 1;
-  std::cout << "Repeating lookup code " << num_repeats << " time(s)." << std::endl;
+  bool throughput_mode = cli_result.count("through");
+  size_t repetition_count = throughput_mode ? cli_result["repeats"].as<int>() : 1;
+  std::cout << "Executing benchmark with " << repetition_count << " repetition(s)." << std::endl;
 
-  size_t num_threads = result["threads"].as<int>();
-  std::cout << "Using " << num_threads << " thread(s)." << std::endl;
+  size_t thread_count = cli_result["threads"].as<int>();
+  std::cout << "Utilizing " << thread_count << " thread(s)." << std::endl;
 
-  bool build        = result.count("build");
-  bool fence        = result.count("fence");
-  bool track_errors = result.count("errors");
-  bool verify       = result.count("verify");
-  bool cold_cache   = result.count("cold-cache");
-  bool csv          = result.count("csv");
-  bool pareto       = result.count("pareto");
+  bool build_phase        = cli_result.count("build");
+  bool memory_fence        = cli_result.count("fence");
+  bool error_tracking = cli_result.count("errors");
+  bool verification_mode       = cli_result.count("verify");
+  bool cache_clear   = cli_result.count("cold-cache");
+  bool csv_output          = cli_result.count("csv");
+  bool pareto_analysis       = cli_result.count("pareto");
 
-  std::string filename   = result["data"].as<std::string>();
-  std::string ops        = result["ops"].as<std::string>();
-  std::string search_type= result["search"].as<std::string>();
+  std::string filename   = cli_result["data"].as<std::string>();
+  std::string operations        = cli_result["ops"].as<std::string>();
+  std::string search_algorithm= cli_result["search"].as<std::string>();
 
-  bool only_mode = result.count("only") || std::getenv("TLI_ONLY");
-  std::vector<int> params = result["params"].as<std::vector<int>>();
+  bool selection_mode = cli_result.count("only") || std::getenv("TLI_ONLY");
+  std::vector<int> configuration_params = cli_result["params"].as<std::vector<int>>();
 
-  std::string only;
-  if (result.count("only")) {
-    only = result["only"].as<std::string>();
+  std::string selected_index;
+  if (cli_result.count("only")) {
+    selected_index = cli_result["only"].as<std::string>();
   } else if (std::getenv("TLI_ONLY")) {
-    only = std::string(std::getenv("TLI_ONLY"));
+    selected_index = std::string(std::getenv("TLI_ONLY"));
   } else {
-    only = "";
+    selected_index = "";
   }
 
-  DataType type = util::resolve_type(filename);
+  DataType data_type = util::resolve_type(filename);
 
-  switch (type) {
+  switch (data_type) {
     case DataType::UINT64: {
       // Create benchmark.
-      if (track_errors){
-        if (num_threads > 1){
-          add_search_types(execute_64_bit, uint64_t, 2);
+      if (error_tracking){
+        if (thread_count > 1){
+          add_search_types(run_uint64_benchmark, uint64_t, 2);
         } else {
-          add_search_types(execute_64_bit, uint64_t, 1);
+          add_search_types(run_uint64_benchmark, uint64_t, 1);
         }
       }
       else{
-        add_search_types(execute_64_bit, uint64_t, 0);
+        add_search_types(run_uint64_benchmark, uint64_t, 0);
       }
       break;
     }
 
     case DataType::STRING: {
       // Create benchmark.
-      if (track_errors){
-        if (num_threads > 1){
-          add_search_types(execute_string, std::string, 2);
+      if (error_tracking){
+        if (thread_count > 1){
+          add_search_types(run_string_benchmark, std::string, 2);
         } else{
-          add_search_types(execute_string, std::string, 1);
+          add_search_types(run_string_benchmark, std::string, 1);
         }
       }
       else{
-        add_search_types(execute_string, std::string, 0);
+        add_search_types(run_string_benchmark, std::string, 0);
       }
       break;
     }
