@@ -128,23 +128,15 @@ To implement the hybrid approach, refer to `competitors/dynamic_pgm_index.h` as 
 - `competitors/hybrid_pgm_lipp.h`
 
 
-Within these files, you will invoke both LIPP and DPGM. The main challenge is creating an efficient migration strategy. Once you have done so, you can replicate or modify scripts/minimal/ pipeline such that it is tailored for only using the Facebook dataset and the two mixed workloads (insertion heavy and lookup heavy), to build and run benchmarks for your new hybrid approach.
+Within these files, you will invoke both LIPP and DPGM. The main challenge is creating an efficient flushing strategy. Once you have done so, you can replicate or modify scripts/minimal/ pipeline such that it is tailored for the two mixed workloads (insertion heavy and lookup heavy), to build and run benchmarks for your new hybrid approach.
 
-**MileStone 2 (30% of Points. Due 4.18):** Implement the naive hybrid DPGM + LIPP approach. It does not necessarily have to be faster than the baselines. Compare the mixed workload performance among the hybrid approach, DPGM, and LIPP. Provide a 1-2 page report with bar plots of the throughput on two mixed workload mentioned above. 
 
-**MileStone 3 (60% of Points. Due Dean's Date):** Based on the hybrid approach implemented in Milestone 2, propose your own flushing and migration to improve its performance. Compare the mixed workload performance among the improved hybrid approach, DPGM, and LIPP. Provide a 1-2 page report with bar plots of the throughput on two mixed workload mentioned above.
+**Milestone 2 (30% of Points. Due 4.21):** Implement the hybrid DPGM + LIPP approach. It does not have to outperform the baselines. A naive implementation, extracting data from DPGM and inserting it individually into LIPP, is sufficient. Compare the mixed workload performance of the hybrid approach against DPGM and LIPP. For this milestone, only the Facebook dataset needs to be reported.
 
-# (Optional) Task 3: Different data fitting model in PGM
+Provide a 1-2 page report including bar plots for each workload. Each bar plot should compare DPGM, LIPP, and your hybrid approach. For DPGM, experiment with different hyperparameters and choose the best-performing one. Report throughput and index size for each workload, so four bar plots overall.
 
-In original PGM algorithtm, we use linear model to do prediction. In this task, we ask you to explore different prediction models (i.e., non linear models) and analyze how differetent data fitting models will affect the lookup throughput. You only need to implement one differeten data fitting model in this task. You'll get bonus points if you finished this task.
+**Milestone 3 (60% of Points. Due Dean's Date):** This is the open-ended portion of the assignment, where you will propose an improved flushing strategy to achieve higher throughput compared to vanilla DPGM and LIPP. Your proposed hybrid approach should outperform these vanilla baselines. Provide a 2-4 page report that compares the mixed workload performance of your improved hybrid approach against DPGM and LIPP. The report must include bar plots showing throughput and index size for two mixed workloads across all three datasets (12 bar plots total), along with a detailed explanation of your flushing strategy.
+The most practical way to improve throughput is by flushing data asynchronously from DPGM to LIPP during insertion or lookup operations. Experiment with how often should the flushing cycle occur, and modifications to the source code of LIPP and DPGM will likely be required for optimal performance.
+Ensure your proposed approach never discards incoming keys during insertions or lookups while flushing, as doing so would artificially inflate throughput and will not be a valid solution, therefore points will be deducted heavily if we identify when we run your code. You cannot use any other data structures besides LIPP and DPGM. The submission achieving the highest throughput will receive a 20% bonus point.
 
-# Deliverables
-A brief report in PDF format (filename: \$NetID\$\_\$firstname\$\_\$lastname\$.pdf) and the code for the project. Please compress your source code into a .zip file and upload it to Canvas.
 
-In the report, provide any implementation details (hardware configs, dataset size, repetition time) for all the tasks. Each experiment should run 3 times and report the average value. Include the following content:
-
-Task 1: Report the lookup and insertion performance on B+ Tree, LIPP, and DynamicPGM on three datasets (Facebook, Books, and Osmc) and show your results in barplots. Briefly explain your observations.
-
-Task 2: Report the details on how you implement the hybrid index of LIPP and Dynamic PGM, and compare the lookup and insertion performance on your modified index using the same configuration in Task 1. Compare it with the B+Tree, Dynamic PGM and LIPP, explain the difference.
-
-Task 3 (Optional): Report the details on how you implement the different data fitting model in PGM and compare the lookup throughtput with the vanilla PGM index. Briefly explain your observations.
