@@ -89,9 +89,9 @@ public:
         return lipp_result + dpgm_result;
     }
 
-    void Insert(const KeyType& key, uint32_t thread_id) {
+    void Insert(const KeyValue<KeyType>& kv, uint32_t thread_id) {
         // First insert into DPGM without lock
-        dpgm_.Insert(key, thread_id);
+        dpgm_.Insert(kv, thread_id);
         workload_stats_.inserts++;
         
         // Check migration threshold more frequently
