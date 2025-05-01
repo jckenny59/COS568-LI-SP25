@@ -195,7 +195,7 @@ private:
         return hot_keys_.find(key) != hot_keys_.end();
     }
 
-    void trigger_selective_migration(const KeyType& key) {
+    void trigger_selective_migration(const KeyType& key) const {
         if (!migration_in_progress_.load()) {
             std::thread migration_thread([this, key]() {
                 MigrateKeyToLIPP(key);
@@ -204,7 +204,7 @@ private:
         }
     }
 
-    void MigrateKeyToLIPP(const KeyType& key) {
+    void MigrateKeyToLIPP(const KeyType& key) const {
         size_t value = dpgm_.EqualityLookup(key, 0);
         if (value != util::NOT_FOUND) {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -284,7 +284,7 @@ private:
     DynamicPGM<KeyType, SearchClass, pgm_error> dpgm_;
     Lipp<KeyType> lipp_;
     double migration_threshold_;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::atomic<bool> migration_in_progress_;
     std::atomic<size_t> migration_queue_size_;
     bool adaptive_threshold_;
