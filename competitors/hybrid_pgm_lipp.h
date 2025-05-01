@@ -208,8 +208,25 @@ private:
         size_t value = dpgm_.EqualityLookup(key, 0);
         if (value != util::NOT_FOUND) {
             std::lock_guard<std::mutex> lock(mutex_);
+            // Insert into LIPP
             lipp_.Insert(KeyValue<KeyType>{key, value}, 0);
-            dpgm_.Delete(key, 0);
+            
+            // Rebuild DPGM without the migrated key
+            std::vector<KeyValue<KeyType>> dpgm_data;
+            ExtractDPGMData(dpgm_data);
+            
+            // Remove the migrated key from the data
+            dpgm_data.erase(
+                std::remove_if(dpgm_data.begin(), dpgm_data.end(),
+                    [&key](const KeyValue<KeyType>& kv) { return kv.key == key; }),
+                dpgm_data.end()
+            );
+            
+            // Rebuild DPGM with remaining data
+            dpgm_ = DynamicPGM<KeyType, SearchClass, pgm_error>(std::vector<int>());
+            if (!dpgm_data.empty()) {
+                dpgm_.Build(dpgm_data, 1);
+            }
         }
     }
 
