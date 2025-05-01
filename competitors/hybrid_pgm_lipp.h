@@ -12,6 +12,7 @@
 #include <chrono>
 #include <deque>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "../util.h"
 #include "base.h"
