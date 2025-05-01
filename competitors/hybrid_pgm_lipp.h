@@ -282,7 +282,7 @@ private:
     }
 
     DynamicPGM<KeyType, SearchClass, pgm_error> dpgm_;
-    Lipp<KeyType> lipp_;
+    mutable Lipp<KeyType> lipp_;
     double migration_threshold_;
     mutable std::mutex mutex_;
     std::atomic<bool> migration_in_progress_;
