@@ -293,7 +293,7 @@ private:
     std::atomic<bool> stop_worker_{false};
     
     // New members for improved flushing strategy
-    std::unordered_set<KeyType> hot_keys_;
-    std::unordered_map<KeyType, size_t> key_access_count_;
+    mutable std::unordered_set<KeyType> hot_keys_;
+    mutable std::unordered_map<KeyType, size_t> key_access_count_;
     std::chrono::steady_clock::time_point last_flush_time_;
 }; 
