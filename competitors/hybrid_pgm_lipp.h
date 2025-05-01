@@ -298,19 +298,18 @@ private:
         }
     }
 
-    mutable DynamicPGM<KeyType, SearchClass, pgm_error> dpgm_;
-    mutable Lipp<KeyType> lipp_;
+    DynamicPGM<KeyType, SearchClass, pgm_error> dpgm_;
+    Lipp<KeyType> lipp_;
     double migration_threshold_;
-    mutable std::mutex mutex_;
-    std::atomic<bool> migration_in_progress_;
-    std::atomic<size_t> migration_queue_size_;
+    mutable std::atomic<bool> migration_in_progress_;
+    mutable std::atomic<size_t> migration_queue_size_;
     bool adaptive_threshold_;
-    mutable WorkloadStats workload_stats_;
+    mutable std::mutex mutex_;
     std::thread background_worker_;
     std::atomic<bool> stop_worker_{false};
     
     // New members for improved flushing strategy
-    mutable std::unordered_set<KeyType> hot_keys_;
     mutable std::unordered_map<KeyType, size_t> key_access_count_;
-    std::chrono::steady_clock::time_point last_flush_time_;
+    mutable std::unordered_set<KeyType> hot_keys_;
+    mutable std::chrono::steady_clock::time_point last_flush_time_;
 }; 
