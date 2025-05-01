@@ -268,7 +268,7 @@ private:
         }
     }
 
-    void ExtractDPGMData(std::vector<KeyValue<KeyType>>& output) {
+    void ExtractDPGMData(std::vector<KeyValue<KeyType>>& output) const {
         try {
             output.clear();
             KeyType min_key = std::numeric_limits<KeyType>::min();
