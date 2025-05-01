@@ -60,8 +60,11 @@ public:
     }
 
     size_t EqualityLookup(const KeyType& lookup_key, uint32_t thread_id) const {
-        // Update access count for the key
-        key_access_count_[lookup_key]++;
+        // Update access count for the key with proper synchronization
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            key_access_count_[lookup_key]++;
+        }
         
         // First check LIPP for better lookup performance
         size_t lipp_result = lipp_.EqualityLookup(lookup_key, thread_id);
