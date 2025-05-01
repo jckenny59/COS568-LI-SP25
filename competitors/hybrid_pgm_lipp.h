@@ -10,6 +10,7 @@
 #include <queue>
 #include <limits>
 #include <chrono>
+#include <deque>
 
 #include "../util.h"
 #include "base.h"
@@ -21,9 +22,30 @@ class HybridPGMLIPP : public Base<KeyType> {
 public:
     HybridPGMLIPP(const std::vector<int>& params) 
         : dpgm_(params), lipp_(params), migration_threshold_(0.05), 
-          migration_in_progress_(false), migration_queue_size_(0) {
+          migration_in_progress_(false), migration_queue_size_(0),
+          adaptive_threshold_(true), workload_stats_({0, 0, 0}) {
         if (!params.empty()) {
             migration_threshold_ = params[0] / 100.0; // Convert percentage to decimal
+            if (params.size() > 1) {
+                adaptive_threshold_ = (params[1] != 0);
+            }
+        }
+        
+        // Start background worker for adaptive threshold adjustment
+        if (adaptive_threshold_) {
+            background_worker_ = std::thread([this]() {
+                while (!stop_worker_) {
+                    adjust_migration_threshold();
+                    std::this_thread::sleep_for(std::chrono::seconds(5));
+                }
+            });
+        }
+    }
+
+    ~HybridPGMLIPP() {
+        if (adaptive_threshold_) {
+            stop_worker_ = true;
+            background_worker_.join();
         }
     }
 
@@ -36,10 +58,12 @@ public:
         // First check DPGM
         size_t dpgm_result = dpgm_.EqualityLookup(lookup_key, thread_id);
         if (dpgm_result != util::NOT_FOUND) {
+            workload_stats_.lookups++;
             return dpgm_result;
         }
         
         // If not found in DPGM, check LIPP
+        workload_stats_.lookups++;
         return lipp_.EqualityLookup(lookup_key, thread_id);
     }
 
@@ -53,6 +77,7 @@ public:
     void Insert(const KeyValue<KeyType>& data, uint32_t thread_id) {
         // First insert into DPGM without lock
         dpgm_.Insert(data, thread_id);
+        workload_stats_.inserts++;
         
         // Check migration threshold periodically
         static size_t insert_count = 0;
@@ -80,10 +105,38 @@ public:
         vec.push_back(SearchClass::name());
         vec.push_back(std::to_string(pgm_error));
         vec.push_back(std::to_string(static_cast<int>(migration_threshold_ * 100)));
+        vec.push_back(adaptive_threshold_ ? "adaptive" : "fixed");
         return vec;
     }
 
 private:
+    struct WorkloadStats {
+        std::atomic<size_t> inserts{0};
+        std::atomic<size_t> lookups{0};
+        std::atomic<size_t> migrations{0};
+    };
+
+    void adjust_migration_threshold() {
+        if (!adaptive_threshold_) return;
+
+        size_t total_ops = workload_stats_.inserts + workload_stats_.lookups;
+        if (total_ops == 0) return;
+
+        double insert_ratio = static_cast<double>(workload_stats_.inserts) / total_ops;
+        
+        // Adjust threshold based on workload characteristics
+        if (insert_ratio > 0.7) {
+            // Insert-heavy workload: increase threshold to reduce migration frequency
+            migration_threshold_ = std::min(0.2, migration_threshold_ * 1.1);
+        } else if (insert_ratio < 0.3) {
+            // Lookup-heavy workload: decrease threshold to migrate more frequently
+            migration_threshold_ = std::max(0.02, migration_threshold_ * 0.9);
+        }
+        
+        // Reset stats
+        workload_stats_ = {0, 0, 0};
+    }
+
     void StartAsyncMigration() {
         // Don't start a new migration if one is already in progress
         bool expected = false;
@@ -94,6 +147,7 @@ private:
         std::thread migration_thread([this]() {
             MigrateDPGMToLIPP();
             migration_in_progress_.store(false);
+            workload_stats_.migrations++;
         });
         migration_thread.detach();
     }
@@ -171,4 +225,8 @@ private:
     std::mutex mutex_;
     std::atomic<bool> migration_in_progress_;
     std::atomic<size_t> migration_queue_size_;
+    bool adaptive_threshold_;
+    WorkloadStats workload_stats_;
+    std::thread background_worker_;
+    std::atomic<bool> stop_worker_{false};
 }; 
