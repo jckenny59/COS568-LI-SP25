@@ -307,6 +307,7 @@ private:
     mutable std::mutex mutex_;
     std::thread background_worker_;
     std::atomic<bool> stop_worker_{false};
+    mutable WorkloadStats workload_stats_;
     
     // New members for improved flushing strategy
     mutable std::unordered_map<KeyType, size_t> key_access_count_;
