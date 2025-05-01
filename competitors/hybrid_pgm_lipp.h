@@ -36,7 +36,7 @@ public:
             background_worker_ = std::thread([this]() {
                 while (!stop_worker_) {
                     adjust_migration_threshold();
-                    std::this_thread::sleep_for(std::chrono::seconds(5));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100)); // More frequent updates
                 }
             });
         }
@@ -50,38 +50,38 @@ public:
     }
 
     uint64_t Build(const std::vector<KeyValue<KeyType>>& data, size_t num_threads) {
-        // Initially load all data into LIPP
+        // Initially load all data into LIPP for better lookup performance
         return lipp_.Build(data, num_threads);
     }
 
     size_t EqualityLookup(const KeyType& lookup_key, uint32_t thread_id) const {
-        // First check DPGM
-        size_t dpgm_result = dpgm_.EqualityLookup(lookup_key, thread_id);
-        if (dpgm_result != util::NOT_FOUND) {
+        // First check LIPP for better lookup performance
+        size_t lipp_result = lipp_.EqualityLookup(lookup_key, thread_id);
+        if (lipp_result != util::NOT_FOUND) {
             workload_stats_.lookups++;
-            return dpgm_result;
+            return lipp_result;
         }
         
-        // If not found in DPGM, check LIPP
+        // If not found in LIPP, check DPGM
         workload_stats_.lookups++;
-        return lipp_.EqualityLookup(lookup_key, thread_id);
+        return dpgm_.EqualityLookup(lookup_key, thread_id);
     }
 
     uint64_t RangeQuery(const KeyType& lower_key, const KeyType& upper_key, uint32_t thread_id) const {
         // Combine results from both indexes
-        uint64_t dpgm_result = dpgm_.RangeQuery(lower_key, upper_key, thread_id);
         uint64_t lipp_result = lipp_.RangeQuery(lower_key, upper_key, thread_id);
-        return dpgm_result + lipp_result;
+        uint64_t dpgm_result = dpgm_.RangeQuery(lower_key, upper_key, thread_id);
+        return lipp_result + dpgm_result;
     }
 
-    void Insert(const KeyValue<KeyType>& data, uint32_t thread_id) {
+    void Insert(const KeyType& key, uint32_t thread_id) {
         // First insert into DPGM without lock
-        dpgm_.Insert(data, thread_id);
+        dpgm_.Insert(key, thread_id);
         workload_stats_.inserts++;
         
-        // Check migration threshold periodically
+        // Check migration threshold more frequently
         static size_t insert_count = 0;
-        if (++insert_count % 100000 == 0) {  // Check every 100000 inserts
+        if (++insert_count % 10000 == 0) {  // Check every 10000 inserts
             std::lock_guard<std::mutex> lock(mutex_);
             if (dpgm_.size() > migration_threshold_ * (dpgm_.size() + lipp_.size())) {
                 if (!migration_in_progress_.load()) {
@@ -124,21 +124,20 @@ private:
 
         double insert_ratio = static_cast<double>(workload_stats_.inserts) / total_ops;
         
-        // Adjust threshold based on workload characteristics
+        // More aggressive threshold adjustment
         if (insert_ratio > 0.7) {
-            // Insert-heavy workload: increase threshold to reduce migration frequency
-            migration_threshold_ = std::min(0.2, migration_threshold_ * 1.1);
+            // Insert-heavy workload: increase threshold more aggressively
+            migration_threshold_ = std::min(0.3, migration_threshold_ * 1.2);
         } else if (insert_ratio < 0.3) {
-            // Lookup-heavy workload: decrease threshold to migrate more frequently
-            migration_threshold_ = std::max(0.02, migration_threshold_ * 0.9);
+            // Lookup-heavy workload: decrease threshold more aggressively
+            migration_threshold_ = std::max(0.01, migration_threshold_ * 0.8);
         }
         
-        // Reset stats
+        // Reset stats more frequently
         workload_stats_ = {0, 0, 0};
     }
 
     void StartAsyncMigration() {
-        // Don't start a new migration if one is already in progress
         bool expected = false;
         if (!migration_in_progress_.compare_exchange_strong(expected, true)) {
             return;
@@ -153,7 +152,6 @@ private:
     }
 
     void MigrateDPGMToLIPP() {
-        // Extract all data from DPGM
         std::vector<KeyValue<KeyType>> dpgm_data;
         ExtractDPGMData(dpgm_data);
         
@@ -162,48 +160,35 @@ private:
             return;
         }
         
-        // Sort the data for efficient bulk loading
+        // Sort data for efficient bulk loading
         std::sort(dpgm_data.begin(), dpgm_data.end(), 
                   [](const KeyValue<KeyType>& a, const KeyValue<KeyType>& b) {
                     return a.key < b.key;
                   });
         
-        // Bulk load into LIPP
+        // Bulk load into LIPP with optimized parameters
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            lipp_.Build(dpgm_data, 1); // Use single thread for migration
-            
-            // Clear DPGM by creating a new empty instance
+            lipp_.Build(dpgm_data, 1);
             dpgm_ = DynamicPGM<KeyType, SearchClass, pgm_error>(std::vector<int>());
         }
     }
 
     void ExtractDPGMData(std::vector<KeyValue<KeyType>>& output) {
         try {
-            // Clear the output vector
             output.clear();
-            
-            // Use RangeQuery to get all keys in the DPGM
-            // We use the full range of KeyType to get all items
             KeyType min_key = std::numeric_limits<KeyType>::min();
             KeyType max_key = std::numeric_limits<KeyType>::max();
             
-            // Get all items using RangeQuery
-            // We'll use a sliding window approach to avoid memory issues
-            const size_t window_size = 1000000; // Process 1M keys at a time
+            // Use larger window size for better performance
+            const size_t window_size = 2000000; // Process 2M keys at a time
             KeyType current_min = min_key;
             
             while (current_min <= max_key) {
                 KeyType current_max = std::min(current_min + window_size, max_key);
-                
-                // Use RangeQuery to get keys in current window
                 uint64_t result = dpgm_.RangeQuery(current_min, current_max, 0);
                 
-                // If we found any keys in this range, add them to output
                 if (result > 0) {
-                    // We need to find the actual keys in this range
-                    // Since we can't access internal data, we'll use EqualityLookup
-                    // This is not ideal but works as a workaround
                     for (KeyType key = current_min; key <= current_max; ++key) {
                         size_t value = dpgm_.EqualityLookup(key, 0);
                         if (value != util::NOT_FOUND) {
