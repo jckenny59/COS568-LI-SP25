@@ -126,9 +126,9 @@ public:
 
 private:
     struct WorkloadStats {
-        std::atomic<size_t> inserts{0};
-        std::atomic<size_t> lookups{0};
-        std::atomic<size_t> migrations{0};
+        mutable std::atomic<size_t> inserts{0};
+        mutable std::atomic<size_t> lookups{0};
+        mutable std::atomic<size_t> migrations{0};
 
         void reset() {
             inserts.store(0);
@@ -288,7 +288,7 @@ private:
     std::atomic<bool> migration_in_progress_;
     std::atomic<size_t> migration_queue_size_;
     bool adaptive_threshold_;
-    WorkloadStats workload_stats_;
+    mutable WorkloadStats workload_stats_;
     std::thread background_worker_;
     std::atomic<bool> stop_worker_{false};
     
