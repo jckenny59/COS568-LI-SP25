@@ -129,6 +129,12 @@ private:
         std::atomic<size_t> inserts{0};
         std::atomic<size_t> lookups{0};
         std::atomic<size_t> migrations{0};
+
+        void reset() {
+            inserts.store(0);
+            lookups.store(0);
+            migrations.store(0);
+        }
     };
 
     bool should_flush() const {
@@ -166,7 +172,7 @@ private:
         }
         
         // Reset stats more frequently
-        workload_stats_ = {0, 0, 0};
+        workload_stats_.reset();
     }
 
     void update_hot_keys() {
