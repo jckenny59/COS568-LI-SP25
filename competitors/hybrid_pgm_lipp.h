@@ -298,7 +298,7 @@ private:
         }
     }
 
-    DynamicPGM<KeyType, SearchClass, pgm_error> dpgm_;
+    mutable DynamicPGM<KeyType, SearchClass, pgm_error> dpgm_;
     mutable Lipp<KeyType> lipp_;
     double migration_threshold_;
     mutable std::mutex mutex_;
