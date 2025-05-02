@@ -81,56 +81,56 @@ public:
     }
 
     size_t EqualityLookup(const KeyType& lookup_key, uint32_t thread_id) const {
-        pre_operation();
-        // First check LIPP for hot keys
-        size_t lipp_result = lipp_.EqualityLookup(lookup_key, thread_id);
-        if (lipp_result != util::NOT_FOUND) {
-            workload_stats_.lookups++;
-            return lipp_result;
+        // First check LIPP for hot keys with atomic check
+        if (!migration_in_progress_.load(std::memory_order_acquire)) {
+            size_t lipp_result = lipp_.EqualityLookup(lookup_key, thread_id);
+            if (lipp_result != util::NOT_FOUND) {
+                workload_stats_.lookups++;
+                return lipp_result;
+            }
         }
         
-        // If not found in LIPP, check DPGM
+        // If not found in LIPP or migration in progress, check DPGM
         workload_stats_.lookups++;
         size_t dpgm_result = dpgm_.EqualityLookup(lookup_key, thread_id);
         
         // Update access count and check if key should be migrated
         if (dpgm_result != util::NOT_FOUND) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            auto& stats = key_stats_[lookup_key];
-            auto current_time = std::chrono::steady_clock::now().time_since_epoch().count();
-            
-            // Check if this is a recent access (within 50ms)
-            if (current_time - stats.last_access_time < 50000000) { // 50ms
-                stats.consecutive_accesses++;
-            } else {
-                stats.consecutive_accesses = 1;
-            }
-            
-            // Update statistics
-            stats.access_count++;
-            stats.total_accesses++;
-            stats.last_access_time = current_time;
-            
-            // Smarter migration decision based on access patterns
-            if (!stats.is_hot && 
-                (stats.consecutive_accesses >= 2 || // Quick consecutive accesses
-                 (stats.total_accesses >= 3 && current_time - stats.last_migration_time > 1000000000))) { // Total access threshold with cooldown
-                stats.is_hot = true;
-                stats.last_migration_time = current_time;
+            // Use try_lock to avoid blocking
+            std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+            if (lock.owns_lock()) {
+                auto& stats = key_stats_[lookup_key];
+                auto current_time = std::chrono::steady_clock::now().time_since_epoch().count();
                 
-                // Use a temporary queue to avoid deadlocks
-                std::vector<KeyType> temp_queue;
-                temp_queue.push_back(lookup_key);
-                
-                // Add to migration queue if not already there
-                if (std::find(migration_queue_.begin(), migration_queue_.end(), lookup_key) == migration_queue_.end()) {
-                    migration_queue_.push_back(lookup_key);
+                // Check if this is a recent access (within 50ms)
+                if (current_time - stats.last_access_time < 50000000) { // 50ms
+                    stats.consecutive_accesses++;
+                } else {
+                    stats.consecutive_accesses = 1;
                 }
                 
-                // Trigger migration if we have enough keys or if this is a very hot key
-                if (migration_queue_.size() >= 200 || stats.consecutive_accesses >= 3) {
-                    if (!migration_in_progress_.load()) {
-                        const_cast<HybridPGMLIPP*>(this)->StartAsyncMigration();
+                // Update statistics
+                stats.access_count++;
+                stats.total_accesses++;
+                stats.last_access_time = current_time;
+                
+                // More conservative migration decision
+                if (!stats.is_hot && 
+                    stats.consecutive_accesses >= 3 && // Increased threshold
+                    current_time - stats.last_migration_time > 1000000000) { // 1s cooldown
+                    stats.is_hot = true;
+                    stats.last_migration_time = current_time;
+                    
+                    // Add to migration queue if not already there
+                    if (std::find(migration_queue_.begin(), migration_queue_.end(), lookup_key) == migration_queue_.end()) {
+                        migration_queue_.push_back(lookup_key);
+                    }
+                    
+                    // Only trigger migration if we have enough keys
+                    if (migration_queue_.size() >= 500) { // Increased batch size
+                        if (!migration_in_progress_.load(std::memory_order_acquire)) {
+                            const_cast<HybridPGMLIPP*>(this)->StartAsyncMigration();
+                        }
                     }
                 }
             }
@@ -204,9 +204,11 @@ public:
 
     // Add cleanup before each operation
     void pre_operation() const {
-        if (!migration_in_progress_.load()) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (should_flush()) {
+        // Only check migration if we're not in a critical section
+        if (!migration_in_progress_.load(std::memory_order_acquire)) {
+            // Use try_lock to avoid blocking
+            std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+            if (lock.owns_lock() && should_flush()) {
                 const_cast<HybridPGMLIPP*>(this)->StartAsyncMigration();
             }
         }
@@ -315,23 +317,25 @@ private:
     }
 
     void StartAsyncMigration() {
-        if (migration_in_progress_.load()) {
+        if (migration_in_progress_.load(std::memory_order_acquire)) {
             return;
         }
 
         try {
-            migration_in_progress_.store(true);
-            std::thread([this]() {
+            migration_in_progress_.store(true, std::memory_order_release);
+            // Store the thread handle to ensure proper cleanup
+            migration_thread_ = std::thread([this]() {
                 try {
                     MigrateHotKeys();
                 } catch (const std::exception& e) {
                     std::cerr << "Migration thread error: " << e.what() << std::endl;
                 }
-                migration_in_progress_.store(false);
-            }).detach();
+                migration_in_progress_.store(false, std::memory_order_release);
+            });
+            migration_thread_.detach();
         } catch (const std::exception& e) {
             std::cerr << "Error starting migration thread: " << e.what() << std::endl;
-            migration_in_progress_.store(false);
+            migration_in_progress_.store(false, std::memory_order_release);
         }
     }
 
@@ -344,7 +348,7 @@ private:
             std::vector<KeyValue<KeyType>> keys_to_migrate;
             std::unordered_set<KeyType> migrated_keys;
             
-            // Get a snapshot of the migration queue with bounds checking
+            // Get a snapshot of the migration queue
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (migration_queue_.empty()) {
@@ -378,7 +382,7 @@ private:
                         return a.key < b.key;
                       });
             
-            // Bulk load into LIPP with error handling
+            // Bulk load into LIPP
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 try {
@@ -408,7 +412,7 @@ private:
             }
             
             // Wait for any ongoing migration to complete
-            while (migration_in_progress_.load()) {
+            while (migration_in_progress_.load(std::memory_order_acquire)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
             
@@ -422,7 +426,7 @@ private:
             }
 
             // Reset state
-            migration_in_progress_.store(false);
+            migration_in_progress_.store(false, std::memory_order_release);
             stop_worker_ = false;
             workload_stats_.reset();
             last_flush_time_ = std::chrono::steady_clock::now();
@@ -448,4 +452,5 @@ private:
     mutable std::list<KeyType> migration_queue_;
     mutable std::chrono::steady_clock::time_point last_flush_time_;
     mutable std::unordered_map<KeyType, KeyStats> key_stats_;
+    std::thread migration_thread_;
 }; 
