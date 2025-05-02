@@ -42,7 +42,7 @@ public:
                 while (!stop_worker_) {
                     adjust_migration_threshold();
                     update_hot_keys();
-                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Reduced sleep time
                 }
             });
         }
@@ -57,7 +57,51 @@ public:
 
     uint64_t Build(const std::vector<KeyValue<KeyType>>& data, size_t num_threads) {
         // Initially load all data into DPGM
-        return dpgm_.Build(data, num_threads);
+        uint64_t build_time = dpgm_.Build(data, num_threads);
+        
+        // Pre-warm LIPP with frequently accessed keys
+        if (data.size() > 0) {
+            std::vector<KeyValue<KeyType>> initial_hot_keys;
+            size_t sample_size = std::min(data.size(), size_t(1000000)); // Sample up to 1M keys
+            
+            // Sample keys from the middle of the data (often more frequently accessed)
+            size_t start_idx = data.size() / 2 - sample_size / 2;
+            for (size_t i = 0; i < sample_size; ++i) {
+                initial_hot_keys.push_back(data[start_idx + i]);
+            }
+            
+            // Sort for efficient bulk loading
+            std::sort(initial_hot_keys.begin(), initial_hot_keys.end(),
+                     [](const KeyValue<KeyType>& a, const KeyValue<KeyType>& b) {
+                         return a.key < b.key;
+                     });
+            
+            // Bulk load into LIPP
+            lipp_.Build(initial_hot_keys, 1);
+            
+            // Remove these keys from DPGM
+            std::vector<KeyValue<KeyType>> remaining_keys;
+            for (const auto& kv : data) {
+                bool is_hot = false;
+                for (const auto& hot_kv : initial_hot_keys) {
+                    if (kv.key == hot_kv.key) {
+                        is_hot = true;
+                        break;
+                    }
+                }
+                if (!is_hot) {
+                    remaining_keys.push_back(kv);
+                }
+            }
+            
+            // Rebuild DPGM with remaining keys
+            dpgm_ = DynamicPGM<KeyType, SearchClass, pgm_error>(std::vector<int>());
+            if (!remaining_keys.empty()) {
+                dpgm_.Build(remaining_keys, 1);
+            }
+        }
+        
+        return build_time;
     }
 
     size_t EqualityLookup(const KeyType& lookup_key, uint32_t thread_id) const {
@@ -77,10 +121,11 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             key_access_count_[lookup_key]++;
             
-            // If key is accessed frequently, add to migration queue
-            if (key_access_count_[lookup_key] > 5) { // Lower threshold for faster migration
+            // Lower threshold for faster migration (3 accesses instead of 5)
+            if (key_access_count_[lookup_key] > 3) {
                 migration_queue_.push_back(lookup_key);
-                if (migration_queue_.size() >= 1000 && !migration_in_progress_.load()) {
+                // Increased batch size for more efficient migrations
+                if (migration_queue_.size() >= 2000 && !migration_in_progress_.load()) {
                     const_cast<HybridPGMLIPP*>(this)->StartAsyncMigration();
                 }
             }
@@ -102,7 +147,7 @@ public:
         workload_stats_.inserts++;
         
         // Check if we should trigger migration
-        if (workload_stats_.inserts % 1000 == 0) {
+        if (workload_stats_.inserts % 500 == 0) { // More frequent checks
             std::lock_guard<std::mutex> lock(mutex_);
             if (should_flush() && !migration_in_progress_.load()) {
                 StartAsyncMigration();
@@ -146,10 +191,10 @@ private:
         auto time_since_last_flush = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_flush_time_).count();
         
         // Flush if we have enough hot keys to migrate
-        bool hot_keys_threshold = migration_queue_.size() >= 1000;
+        bool hot_keys_threshold = migration_queue_.size() >= 2000; // Increased batch size
         
         // Flush if enough time has passed since last flush
-        bool time_threshold = time_since_last_flush > 1000;
+        bool time_threshold = time_since_last_flush > 500; // More frequent flushes
         
         return hot_keys_threshold || time_threshold;
     }
@@ -162,13 +207,13 @@ private:
 
         double insert_ratio = static_cast<double>(workload_stats_.inserts) / total_ops;
         
-        // Adjust threshold based on workload characteristics
+        // More aggressive threshold adjustment based on workload
         if (insert_ratio > 0.7) {
-            // Insert-heavy workload: increase threshold
-            migration_threshold_ = std::min(0.3, migration_threshold_ * 1.1);
+            // Insert-heavy workload: increase threshold more aggressively
+            migration_threshold_ = std::min(0.3, migration_threshold_ * 1.2);
         } else if (insert_ratio < 0.3) {
-            // Lookup-heavy workload: decrease threshold
-            migration_threshold_ = std::max(0.01, migration_threshold_ * 0.9);
+            // Lookup-heavy workload: decrease threshold more aggressively
+            migration_threshold_ = std::max(0.01, migration_threshold_ * 0.8);
         }
         
         workload_stats_.reset();
