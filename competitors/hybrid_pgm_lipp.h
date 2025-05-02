@@ -13,6 +13,7 @@
 #include <deque>
 #include <unordered_map>
 #include <unordered_set>
+#include <list>
 
 #include "../util.h"
 #include "base.h"
@@ -41,7 +42,7 @@ public:
                 while (!stop_worker_) {
                     adjust_migration_threshold();
                     update_hot_keys();
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 }
             });
         }
@@ -55,18 +56,12 @@ public:
     }
 
     uint64_t Build(const std::vector<KeyValue<KeyType>>& data, size_t num_threads) {
-        // Initially load all data into LIPP for better lookup performance
-        return lipp_.Build(data, num_threads);
+        // Initially load all data into DPGM
+        return dpgm_.Build(data, num_threads);
     }
 
     size_t EqualityLookup(const KeyType& lookup_key, uint32_t thread_id) const {
-        // Update access count for the key with proper synchronization
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            key_access_count_[lookup_key]++;
-        }
-        
-        // First check LIPP for better lookup performance
+        // First check LIPP for hot keys
         size_t lipp_result = lipp_.EqualityLookup(lookup_key, thread_id);
         if (lipp_result != util::NOT_FOUND) {
             workload_stats_.lookups++;
@@ -77,9 +72,18 @@ public:
         workload_stats_.lookups++;
         size_t dpgm_result = dpgm_.EqualityLookup(lookup_key, thread_id);
         
-        // If found in DPGM and it's a hot key, trigger migration
-        if (dpgm_result != util::NOT_FOUND && is_hot_key(lookup_key)) {
-            trigger_selective_migration(lookup_key);
+        // Update access count and check if key should be migrated
+        if (dpgm_result != util::NOT_FOUND) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            key_access_count_[lookup_key]++;
+            
+            // If key is accessed frequently, add to migration queue
+            if (key_access_count_[lookup_key] > 5) { // Lower threshold for faster migration
+                migration_queue_.push_back(lookup_key);
+                if (migration_queue_.size() >= 1000 && !migration_in_progress_.load()) {
+                    StartAsyncMigration();
+                }
+            }
         }
         
         return dpgm_result;
@@ -93,18 +97,15 @@ public:
     }
 
     void Insert(const KeyValue<KeyType>& kv, uint32_t thread_id) {
-        // First insert into DPGM without lock
+        // Insert into DPGM first
         dpgm_.Insert(kv, thread_id);
         workload_stats_.inserts++;
         
-        // Check migration threshold more frequently
-        static size_t insert_count = 0;
-        if (++insert_count % 1000 == 0) {  // Check every 1000 inserts
+        // Check if we should trigger migration
+        if (workload_stats_.inserts % 1000 == 0) {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (should_flush()) {
-                if (!migration_in_progress_.load()) {
-                    StartAsyncMigration();
-                }
+            if (should_flush() && !migration_in_progress_.load()) {
+                StartAsyncMigration();
             }
         }
     }
@@ -141,20 +142,16 @@ private:
     };
 
     bool should_flush() const {
-        // Check if we should flush based on multiple criteria
         auto now = std::chrono::steady_clock::now();
         auto time_since_last_flush = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_flush_time_).count();
         
-        // Flush if DPGM size exceeds threshold
-        bool size_threshold = dpgm_.size() > migration_threshold_ * (dpgm_.size() + lipp_.size());
+        // Flush if we have enough hot keys to migrate
+        bool hot_keys_threshold = migration_queue_.size() >= 1000;
         
         // Flush if enough time has passed since last flush
-        bool time_threshold = time_since_last_flush > 1000; // 1 second
+        bool time_threshold = time_since_last_flush > 1000;
         
-        // Flush if we have enough hot keys to migrate
-        bool hot_keys_threshold = hot_keys_.size() > 1000;
-        
-        return size_threshold || (time_threshold && hot_keys_threshold);
+        return hot_keys_threshold || time_threshold;
     }
 
     void adjust_migration_threshold() {
@@ -165,71 +162,28 @@ private:
 
         double insert_ratio = static_cast<double>(workload_stats_.inserts) / total_ops;
         
-        // More aggressive threshold adjustment
+        // Adjust threshold based on workload characteristics
         if (insert_ratio > 0.7) {
-            // Insert-heavy workload: increase threshold more aggressively
-            migration_threshold_ = std::min(0.3, migration_threshold_ * 1.2);
+            // Insert-heavy workload: increase threshold
+            migration_threshold_ = std::min(0.3, migration_threshold_ * 1.1);
         } else if (insert_ratio < 0.3) {
-            // Lookup-heavy workload: decrease threshold more aggressively
-            migration_threshold_ = std::max(0.01, migration_threshold_ * 0.8);
+            // Lookup-heavy workload: decrease threshold
+            migration_threshold_ = std::max(0.01, migration_threshold_ * 0.9);
         }
         
-        // Reset stats more frequently
         workload_stats_.reset();
     }
 
     void update_hot_keys() {
-        // Update hot keys based on access patterns
         std::lock_guard<std::mutex> lock(mutex_);
-        hot_keys_.clear();
         
-        // Find keys with high access counts
-        for (const auto& pair : key_access_count_) {
-            if (pair.second > 10) { // Key accessed more than 10 times
-                hot_keys_.insert(pair.first);
-            }
-        }
-        
-        // Reset access counts periodically
+        // Clear old access counts
         key_access_count_.clear();
-    }
-
-    bool is_hot_key(const KeyType& key) const {
-        return hot_keys_.find(key) != hot_keys_.end();
-    }
-
-    void trigger_selective_migration(const KeyType& key) const {
-        if (!migration_in_progress_.load()) {
-            std::thread migration_thread([this, key]() {
-                MigrateKeyToLIPP(key);
-            });
-            migration_thread.detach();
-        }
-    }
-
-    void MigrateKeyToLIPP(const KeyType& key) const {
-        size_t value = dpgm_.EqualityLookup(key, 0);
-        if (value != util::NOT_FOUND) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            // Insert into LIPP
-            lipp_.Insert(KeyValue<KeyType>{key, value}, 0);
-            
-            // Rebuild DPGM without the migrated key
-            std::vector<KeyValue<KeyType>> dpgm_data;
-            ExtractDPGMData(dpgm_data);
-            
-            // Remove the migrated key from the data
-            dpgm_data.erase(
-                std::remove_if(dpgm_data.begin(), dpgm_data.end(),
-                    [&key](const KeyValue<KeyType>& kv) { return kv.key == key; }),
-                dpgm_data.end()
-            );
-            
-            // Rebuild DPGM with remaining data
-            dpgm_ = DynamicPGM<KeyType, SearchClass, pgm_error>(std::vector<int>());
-            if (!dpgm_data.empty()) {
-                dpgm_.Build(dpgm_data, 1);
-            }
+        
+        // Update hot keys set
+        hot_keys_.clear();
+        for (const auto& key : migration_queue_) {
+            hot_keys_.insert(key);
         }
     }
 
@@ -240,7 +194,7 @@ private:
         }
         
         std::thread migration_thread([this]() {
-            MigrateDPGMToLIPP();
+            MigrateHotKeys();
             migration_in_progress_.store(false);
             workload_stats_.migrations++;
             last_flush_time_ = std::chrono::steady_clock::now();
@@ -248,56 +202,45 @@ private:
         migration_thread.detach();
     }
 
-    void MigrateDPGMToLIPP() {
-        std::vector<KeyValue<KeyType>> dpgm_data;
-        ExtractDPGMData(dpgm_data);
+    void MigrateHotKeys() {
+        std::vector<KeyValue<KeyType>> keys_to_migrate;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            
+            // Get values for keys in migration queue
+            for (const auto& key : migration_queue_) {
+                size_t value = dpgm_.EqualityLookup(key, 0);
+                if (value != util::NOT_FOUND) {
+                    keys_to_migrate.push_back(KeyValue<KeyType>{key, value});
+                }
+            }
+            
+            // Clear migration queue
+            migration_queue_.clear();
+        }
         
-        if (dpgm_data.empty()) {
-            migration_in_progress_.store(false);
+        if (keys_to_migrate.empty()) {
             return;
         }
         
-        // Sort data for efficient bulk loading
-        std::sort(dpgm_data.begin(), dpgm_data.end(), 
+        // Sort keys for efficient bulk loading
+        std::sort(keys_to_migrate.begin(), keys_to_migrate.end(),
                   [](const KeyValue<KeyType>& a, const KeyValue<KeyType>& b) {
                     return a.key < b.key;
                   });
         
-        // Bulk load into LIPP with optimized parameters
+        // Bulk load into LIPP
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            lipp_.Build(dpgm_data, 1);
-            dpgm_ = DynamicPGM<KeyType, SearchClass, pgm_error>(std::vector<int>());
+            lipp_.Build(keys_to_migrate, 1);
         }
-    }
-
-    void ExtractDPGMData(std::vector<KeyValue<KeyType>>& output) const {
-        try {
-            output.clear();
-            KeyType min_key = std::numeric_limits<KeyType>::min();
-            KeyType max_key = std::numeric_limits<KeyType>::max();
-            
-            // Use larger window size for better performance
-            const size_t window_size = 2000000; // Process 2M keys at a time
-            KeyType current_min = min_key;
-            
-            while (current_min <= max_key) {
-                KeyType current_max = std::min(current_min + window_size, max_key);
-                uint64_t result = dpgm_.RangeQuery(current_min, current_max, 0);
-                
-                if (result > 0) {
-                    for (KeyType key = current_min; key <= current_max; ++key) {
-                        size_t value = dpgm_.EqualityLookup(key, 0);
-                        if (value != util::NOT_FOUND) {
-                            output.push_back(KeyValue<KeyType>{key, value});
-                        }
-                    }
-                }
-                
-                current_min = current_max + 1;
+        
+        // Remove migrated keys from DPGM
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (const auto& kv : keys_to_migrate) {
+                dpgm_.Delete(kv.key, 0);
             }
-        } catch (const std::exception& e) {
-            std::cerr << "Error in ExtractDPGMData: " << e.what() << std::endl;
         }
     }
 
@@ -312,8 +255,9 @@ private:
     std::atomic<bool> stop_worker_{false};
     mutable WorkloadStats workload_stats_;
     
-    // New members for improved flushing strategy
+    // Improved data structures for tracking hot keys
     mutable std::unordered_map<KeyType, size_t> key_access_count_;
     mutable std::unordered_set<KeyType> hot_keys_;
+    mutable std::list<KeyType> migration_queue_;
     mutable std::chrono::steady_clock::time_point last_flush_time_;
 }; 
