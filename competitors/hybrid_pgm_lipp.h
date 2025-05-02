@@ -364,9 +364,9 @@ private:
             }
             lipp_.Build(lipp_data, 1);
             
-            // Remove migrated keys from PGM
+            // Mark keys as migrated in our tracking
             for (const auto& [key, _] : keys_to_migrate) {
-                dpgm_.erase(key);
+                key_stats_.erase(key);
             }
         }
     }
