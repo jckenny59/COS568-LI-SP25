@@ -12,10 +12,10 @@
 #include <shared_mutex>
 #include <array>
 
-#include "competitors/base.h"
-#include "competitors/lipp.h"
-#include "competitors/dynamic_pgm.h"
-#include "utils.h"
+#include "base.h"
+#include "lipp.h"
+#include "dynamic_pgm_index.h"
+#include "../util.h"
 
 template <class KeyType>
 class HybridPGMLIPP : public Base<KeyType> {
