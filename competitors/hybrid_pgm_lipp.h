@@ -345,9 +345,9 @@ private:
         // Collect hot keys
         for (const auto& [key, stats] : key_stats_) {
             if (stats.consecutive_accesses.load(std::memory_order_relaxed) >= hot_key_threshold_) {
-                auto it = dpgm_.find(key);
-                if (it != dpgm_.end()) {
-                    keys_to_migrate.emplace_back(key, it->value());
+                size_t value = dpgm_.EqualityLookup(key, 0);
+                if (value != util::NOT_FOUND) {
+                    keys_to_migrate.emplace_back(key, value);
                 }
             }
         }
@@ -357,7 +357,12 @@ private:
 
         // Bulk load into LIPP
         if (!keys_to_migrate.empty()) {
-            lipp_.bulk_load(keys_to_migrate.data(), keys_to_migrate.size());
+            std::vector<KeyValue<KeyType>> lipp_data;
+            lipp_data.reserve(keys_to_migrate.size());
+            for (const auto& [key, value] : keys_to_migrate) {
+                lipp_data.push_back({key, value});
+            }
+            lipp_.Build(lipp_data, 1);
             
             // Remove migrated keys from PGM
             for (const auto& [key, _] : keys_to_migrate) {
