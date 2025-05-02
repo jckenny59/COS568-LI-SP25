@@ -49,30 +49,7 @@ public:
     }
 
     ~HybridPGMLIPP() {
-        try {
-            if (adaptive_threshold_) {
-                stop_worker_ = true;
-                if (background_worker_.joinable()) {
-                    background_worker_.join();
-                }
-            }
-            
-            // Wait for any ongoing migration to complete
-            while (migration_in_progress_.load()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-            
-            // Clear all data structures
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                migration_queue_.clear();
-                hot_keys_.clear();
-                key_stats_.clear();
-                key_access_count_.clear();
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "Error during cleanup: " << e.what() << std::endl;
-        }
+        cleanup_resources();
     }
 
     uint64_t Build(const std::vector<KeyValue<KeyType>>& data, size_t num_threads) {
@@ -212,6 +189,11 @@ public:
         return vec;
     }
 
+    // Add cleanup before variant switching
+    void initSearch() {
+        cleanup_resources();
+    }
+
 private:
     struct WorkloadStats {
         mutable std::atomic<size_t> inserts{0};
@@ -254,55 +236,63 @@ private:
     void adjust_migration_threshold() {
         if (!adaptive_threshold_) return;
 
-        size_t total_ops = workload_stats_.inserts + workload_stats_.lookups;
-        if (total_ops == 0) return;
+        try {
+            size_t total_ops = workload_stats_.inserts + workload_stats_.lookups;
+            if (total_ops == 0) return;
 
-        double insert_ratio = static_cast<double>(workload_stats_.inserts) / total_ops;
-        
-        // More sophisticated threshold adjustment
-        if (insert_ratio > 0.7) {
-            // Insert-heavy: be more conservative with migrations
-            migration_threshold_ = std::min(0.1, migration_threshold_ * 1.02);
-        } else if (insert_ratio < 0.3) {
-            // Lookup-heavy: be more aggressive with migrations
-            migration_threshold_ = std::max(0.005, migration_threshold_ * 0.98);
-        } else {
-            // Mixed workload: balanced approach
-            migration_threshold_ = std::max(0.01, migration_threshold_ * 0.99);
-        }
-        
-        // Clean up old key stats more aggressively
-        auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-        std::vector<KeyType> keys_to_remove;
-        
-        // First collect keys to remove
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            for (const auto& [key, stats] : key_stats_) {
-                if (now - stats.last_access_time > 250000000) { // 250ms
-                    keys_to_remove.push_back(key);
+            double insert_ratio = static_cast<double>(workload_stats_.inserts) / total_ops;
+            
+            // More sophisticated threshold adjustment
+            if (insert_ratio > 0.7) {
+                // Insert-heavy: be more conservative with migrations
+                migration_threshold_ = std::min(0.1, migration_threshold_ * 1.02);
+            } else if (insert_ratio < 0.3) {
+                // Lookup-heavy: be more aggressive with migrations
+                migration_threshold_ = std::max(0.005, migration_threshold_ * 0.98);
+            } else {
+                // Mixed workload: balanced approach
+                migration_threshold_ = std::max(0.01, migration_threshold_ * 0.99);
+            }
+            
+            // Clean up old key stats more aggressively
+            auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+            std::vector<KeyType> keys_to_remove;
+            
+            // First collect keys to remove
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                for (const auto& [key, stats] : key_stats_) {
+                    if (now - stats.last_access_time > 250000000) { // 250ms
+                        keys_to_remove.push_back(key);
+                    }
+                }
+                
+                // Then remove them
+                for (const auto& key : keys_to_remove) {
+                    key_stats_.erase(key);
                 }
             }
             
-            // Then remove them
-            for (const auto& key : keys_to_remove) {
-                key_stats_.erase(key);
-            }
+            workload_stats_.reset();
+        } catch (const std::exception& e) {
+            std::cerr << "Error adjusting migration threshold: " << e.what() << std::endl;
         }
-        
-        workload_stats_.reset();
     }
 
     void update_hot_keys() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        
-        // Clear old access counts
-        key_access_count_.clear();
-        
-        // Update hot keys set
-        hot_keys_.clear();
-        for (const auto& key : migration_queue_) {
-            hot_keys_.insert(key);
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            
+            // Clear old access counts
+            key_access_count_.clear();
+            
+            // Update hot keys set
+            hot_keys_.clear();
+            for (const auto& key : migration_queue_) {
+                hot_keys_.insert(key);
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error updating hot keys: " << e.what() << std::endl;
         }
     }
 
@@ -386,6 +376,34 @@ private:
             }
         } catch (const std::exception& e) {
             std::cerr << "Critical error during migration: " << e.what() << std::endl;
+        }
+    }
+
+    void cleanup_resources() {
+        try {
+            // Stop background worker
+            if (adaptive_threshold_) {
+                stop_worker_ = true;
+                if (background_worker_.joinable()) {
+                    background_worker_.join();
+                }
+            }
+            
+            // Wait for any ongoing migration to complete
+            while (migration_in_progress_.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            
+            // Clear all data structures
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                migration_queue_.clear();
+                hot_keys_.clear();
+                key_stats_.clear();
+                key_access_count_.clear();
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error during resource cleanup: " << e.what() << std::endl;
         }
     }
 
