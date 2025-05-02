@@ -21,12 +21,19 @@
 template <class KeyType, class SearchClass, size_t pgm_error>
 class HybridPGMLIPP : public Base<KeyType> {
 public:
-    HybridPGMLIPP() : 
+    HybridPGMLIPP(const std::vector<int>& params) : 
         migration_threshold_(100),
         batch_size_(1000),
         hot_key_threshold_(5) {
         // Initialize thread-local storage for hot key tracking
         thread_local_keys_.reserve(1000);
+        
+        // Parse parameters if provided
+        if (!params.empty()) {
+            if (params.size() >= 1) migration_threshold_ = params[0];
+            if (params.size() >= 2) batch_size_ = params[1];
+            if (params.size() >= 3) hot_key_threshold_ = params[2];
+        }
     }
 
     uint64_t Build(const std::vector<KeyValue<KeyType>>& data, size_t num_threads) {
