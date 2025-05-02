@@ -66,7 +66,12 @@ public:
             dpgm_.Build(data, num_threads);
             
             // Then build LIPP with the same data
-            lipp_.bulk_load(loading_data.data(), loading_data.size());
+            std::vector<KeyValue<KeyType>> lipp_data;
+            lipp_data.reserve(data.size());
+            for (const auto& [key, value] : loading_data) {
+                lipp_data.push_back({key, value});
+            }
+            lipp_.Build(lipp_data, num_threads);
         });
         
         return build_time;
