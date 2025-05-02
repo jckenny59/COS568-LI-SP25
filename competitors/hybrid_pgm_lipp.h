@@ -101,8 +101,8 @@ public:
             auto& stats = key_stats_[lookup_key];
             auto current_time = std::chrono::steady_clock::now().time_since_epoch().count();
             
-            // Check if this is a recent access (within 100ms)
-            if (current_time - stats.last_access_time < 100000000) { // 100ms
+            // Check if this is a recent access (within 50ms)
+            if (current_time - stats.last_access_time < 50000000) { // 50ms
                 stats.consecutive_accesses++;
             } else {
                 stats.consecutive_accesses = 1;
@@ -115,13 +115,14 @@ public:
             
             // Smarter migration decision based on access patterns
             if (!stats.is_hot && 
-                (stats.consecutive_accesses >= 3 || // Quick consecutive accesses
-                 stats.total_accesses >= 5)) {      // Total access threshold
+                (stats.consecutive_accesses >= 2 || // Quick consecutive accesses
+                 (stats.total_accesses >= 3 && current_time - stats.last_migration_time > 1000000000))) { // Total access threshold with cooldown
                 stats.is_hot = true;
+                stats.last_migration_time = current_time;
                 migration_queue_.push_back(lookup_key);
                 
                 // Trigger migration if we have enough keys or if this is a very hot key
-                if (migration_queue_.size() >= 500 || stats.consecutive_accesses >= 5) {
+                if (migration_queue_.size() >= 200 || stats.consecutive_accesses >= 3) {
                     if (!migration_in_progress_.load()) {
                         const_cast<HybridPGMLIPP*>(this)->StartAsyncMigration();
                     }
@@ -157,7 +158,7 @@ public:
         workload_stats_.inserts++;
         
         // More frequent migration checks for insert-heavy workloads
-        if (workload_stats_.inserts % 100 == 0) { // Reduced from 500
+        if (workload_stats_.inserts % 50 == 0) { // Reduced from 100
             std::lock_guard<std::mutex> lock(mutex_);
             if (should_flush() && !migration_in_progress_.load()) {
                 StartAsyncMigration();
@@ -202,6 +203,7 @@ private:
         bool is_hot{false};
         size_t consecutive_accesses{0};
         size_t total_accesses{0};
+        size_t last_migration_time{0};  // Track when key was last migrated
     };
 
     bool should_flush() const {
@@ -215,8 +217,8 @@ private:
         double insert_ratio = static_cast<double>(workload_stats_.inserts) / total_ops;
         
         // Adjust thresholds based on workload
-        size_t min_batch_size = (insert_ratio > 0.7) ? 200 : 500;  // Smaller batches for insert-heavy
-        size_t max_wait_time = (insert_ratio > 0.7) ? 100 : 300;   // More frequent flushes for insert-heavy
+        size_t min_batch_size = (insert_ratio > 0.7) ? 100 : 200;  // Smaller batches for insert-heavy
+        size_t max_wait_time = (insert_ratio > 0.7) ? 50 : 150;    // More frequent flushes for insert-heavy
         
         return migration_queue_.size() >= min_batch_size || time_since_last_flush > max_wait_time;
     }
@@ -232,19 +234,19 @@ private:
         // More sophisticated threshold adjustment
         if (insert_ratio > 0.7) {
             // Insert-heavy: be more conservative with migrations
-            migration_threshold_ = std::min(0.15, migration_threshold_ * 1.05);
+            migration_threshold_ = std::min(0.1, migration_threshold_ * 1.02);
         } else if (insert_ratio < 0.3) {
             // Lookup-heavy: be more aggressive with migrations
-            migration_threshold_ = std::max(0.01, migration_threshold_ * 0.95);
+            migration_threshold_ = std::max(0.005, migration_threshold_ * 0.98);
         } else {
             // Mixed workload: balanced approach
-            migration_threshold_ = std::max(0.02, migration_threshold_ * 0.98);
+            migration_threshold_ = std::max(0.01, migration_threshold_ * 0.99);
         }
         
         // Clean up old key stats more aggressively
         auto now = std::chrono::steady_clock::now().time_since_epoch().count();
         for (auto it = key_stats_.begin(); it != key_stats_.end();) {
-            if (now - it->second.last_access_time > 500000000) { // 500ms
+            if (now - it->second.last_access_time > 250000000) { // 250ms
                 it = key_stats_.erase(it);
             } else {
                 ++it;
