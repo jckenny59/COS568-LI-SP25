@@ -87,14 +87,14 @@ public:
         }
 
         // Key not in LIPP, check PGM
-        auto it = dpgm_.find(lookup_key);
-        if (it == dpgm_.end()) {
+        size_t pgm_result = dpgm_.EqualityLookup(lookup_key, thread_id);
+        if (pgm_result == util::NOT_FOUND) {
             return util::OVERFLOW;
         }
 
         // Key found in PGM, update its access count
         update_hot_keys(lookup_key);
-        return it->value();
+        return pgm_result;
     }
 
     uint64_t RangeQuery(const KeyType& lower_key, const KeyType& upper_key, uint32_t thread_id) const {
