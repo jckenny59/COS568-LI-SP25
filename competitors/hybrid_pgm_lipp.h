@@ -119,7 +119,15 @@ public:
                  (stats.total_accesses >= 3 && current_time - stats.last_migration_time > 1000000000))) { // Total access threshold with cooldown
                 stats.is_hot = true;
                 stats.last_migration_time = current_time;
-                migration_queue_.push_back(lookup_key);
+                
+                // Use a temporary queue to avoid deadlocks
+                std::vector<KeyType> temp_queue;
+                temp_queue.push_back(lookup_key);
+                
+                // Add to migration queue if not already there
+                if (std::find(migration_queue_.begin(), migration_queue_.end(), lookup_key) == migration_queue_.end()) {
+                    migration_queue_.push_back(lookup_key);
+                }
                 
                 // Trigger migration if we have enough keys or if this is a very hot key
                 if (migration_queue_.size() >= 200 || stats.consecutive_accesses >= 3) {
@@ -203,7 +211,7 @@ private:
         bool is_hot{false};
         size_t consecutive_accesses{0};
         size_t total_accesses{0};
-        size_t last_migration_time{0};  // Track when key was last migrated
+        size_t last_migration_time{0};
     };
 
     bool should_flush() const {
@@ -245,12 +253,18 @@ private:
         
         // Clean up old key stats more aggressively
         auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-        for (auto it = key_stats_.begin(); it != key_stats_.end();) {
-            if (now - it->second.last_access_time > 250000000) { // 250ms
-                it = key_stats_.erase(it);
-            } else {
-                ++it;
+        std::vector<KeyType> keys_to_remove;
+        
+        // First collect keys to remove
+        for (const auto& [key, stats] : key_stats_) {
+            if (now - stats.last_access_time > 250000000) { // 250ms
+                keys_to_remove.push_back(key);
             }
+        }
+        
+        // Then remove them
+        for (const auto& key : keys_to_remove) {
+            key_stats_.erase(key);
         }
         
         workload_stats_.reset();
@@ -287,10 +301,10 @@ private:
     void MigrateHotKeys() {
         std::vector<KeyValue<KeyType>> keys_to_migrate;
         std::unordered_set<KeyType> migrated_keys;
+        
+        // Get a snapshot of the migration queue
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            
-            // Get values for keys in migration queue
             for (const auto& key : migration_queue_) {
                 size_t value = dpgm_.EqualityLookup(key, 0);
                 if (value != util::NOT_FOUND) {
@@ -298,8 +312,6 @@ private:
                     migrated_keys.insert(key);
                 }
             }
-            
-            // Clear migration queue
             migration_queue_.clear();
         }
         
@@ -317,8 +329,6 @@ private:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             lipp_.Build(keys_to_migrate, 1);
-            
-            // Update hot keys set
             hot_keys_.insert(migrated_keys.begin(), migrated_keys.end());
         }
     }
