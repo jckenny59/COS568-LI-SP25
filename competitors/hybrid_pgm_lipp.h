@@ -49,13 +49,29 @@ public:
     }
 
     ~HybridPGMLIPP() {
-        if (adaptive_threshold_) {
-            stop_worker_ = true;
-            background_worker_.join();
-        }
-        // Wait for any ongoing migration to complete
-        while (migration_in_progress_.load()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        try {
+            if (adaptive_threshold_) {
+                stop_worker_ = true;
+                if (background_worker_.joinable()) {
+                    background_worker_.join();
+                }
+            }
+            
+            // Wait for any ongoing migration to complete
+            while (migration_in_progress_.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            
+            // Clear all data structures
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                migration_queue_.clear();
+                hot_keys_.clear();
+                key_stats_.clear();
+                key_access_count_.clear();
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error during cleanup: " << e.what() << std::endl;
         }
     }
 
@@ -295,15 +311,20 @@ private:
             return;
         }
 
-        migration_in_progress_.store(true);
-        std::thread([this]() {
-            try {
-                MigrateHotKeys();
-            } catch (const std::exception& e) {
-                std::cerr << "Migration error: " << e.what() << std::endl;
-            }
+        try {
+            migration_in_progress_.store(true);
+            std::thread([this]() {
+                try {
+                    MigrateHotKeys();
+                } catch (const std::exception& e) {
+                    std::cerr << "Migration thread error: " << e.what() << std::endl;
+                }
+                migration_in_progress_.store(false);
+            }).detach();
+        } catch (const std::exception& e) {
+            std::cerr << "Error starting migration thread: " << e.what() << std::endl;
             migration_in_progress_.store(false);
-        }).detach();
+        }
     }
 
     void MigrateHotKeys() {
@@ -311,39 +332,60 @@ private:
             return;
         }
 
-        std::vector<KeyValue<KeyType>> keys_to_migrate;
-        std::unordered_set<KeyType> migrated_keys;
-        
-        // Get a snapshot of the migration queue
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            keys_to_migrate.reserve(migration_queue_.size());
+        try {
+            std::vector<KeyValue<KeyType>> keys_to_migrate;
+            std::unordered_set<KeyType> migrated_keys;
             
-            for (const auto& key : migration_queue_) {
-                size_t value = dpgm_.EqualityLookup(key, 0);
-                if (value != util::NOT_FOUND) {
-                    keys_to_migrate.push_back(KeyValue<KeyType>{key, value});
-                    migrated_keys.insert(key);
+            // Get a snapshot of the migration queue with bounds checking
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (migration_queue_.empty()) {
+                    return;
+                }
+                
+                keys_to_migrate.reserve(migration_queue_.size());
+                
+                for (const auto& key : migration_queue_) {
+                    try {
+                        size_t value = dpgm_.EqualityLookup(key, 0);
+                        if (value != util::NOT_FOUND) {
+                            keys_to_migrate.push_back(KeyValue<KeyType>{key, value});
+                            migrated_keys.insert(key);
+                        }
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error looking up key during migration: " << e.what() << std::endl;
+                        continue;
+                    }
+                }
+                migration_queue_.clear();
+            }
+            
+            if (keys_to_migrate.empty()) {
+                return;
+            }
+            
+            // Sort keys for efficient bulk loading
+            std::sort(keys_to_migrate.begin(), keys_to_migrate.end(),
+                      [](const KeyValue<KeyType>& a, const KeyValue<KeyType>& b) {
+                        return a.key < b.key;
+                      });
+            
+            // Bulk load into LIPP with error handling
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                try {
+                    lipp_.Build(keys_to_migrate, 1);
+                    hot_keys_.insert(migrated_keys.begin(), migrated_keys.end());
+                } catch (const std::exception& e) {
+                    std::cerr << "Error during LIPP bulk load: " << e.what() << std::endl;
+                    // Rollback: clear hot keys for failed migration
+                    for (const auto& key : migrated_keys) {
+                        hot_keys_.erase(key);
+                    }
                 }
             }
-            migration_queue_.clear();
-        }
-        
-        if (keys_to_migrate.empty()) {
-            return;
-        }
-        
-        // Sort keys for efficient bulk loading
-        std::sort(keys_to_migrate.begin(), keys_to_migrate.end(),
-                  [](const KeyValue<KeyType>& a, const KeyValue<KeyType>& b) {
-                    return a.key < b.key;
-                  });
-        
-        // Bulk load into LIPP
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            lipp_.Build(keys_to_migrate, 1);
-            hot_keys_.insert(migrated_keys.begin(), migrated_keys.end());
+        } catch (const std::exception& e) {
+            std::cerr << "Critical error during migration: " << e.what() << std::endl;
         }
     }
 
