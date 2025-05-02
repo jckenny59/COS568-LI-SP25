@@ -203,11 +203,11 @@ public:
     }
 
     // Add cleanup before each operation
-    void pre_operation() {
+    void pre_operation() const {
         if (!migration_in_progress_.load()) {
             std::lock_guard<std::mutex> lock(mutex_);
             if (should_flush()) {
-                StartAsyncMigration();
+                const_cast<HybridPGMLIPP*>(this)->StartAsyncMigration();
             }
         }
     }
