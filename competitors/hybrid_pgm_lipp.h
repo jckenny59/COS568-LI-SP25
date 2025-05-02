@@ -81,7 +81,7 @@ public:
             if (key_access_count_[lookup_key] > 5) { // Lower threshold for faster migration
                 migration_queue_.push_back(lookup_key);
                 if (migration_queue_.size() >= 1000 && !migration_in_progress_.load()) {
-                    StartAsyncMigration();
+                    const_cast<HybridPGMLIPP*>(this)->StartAsyncMigration();
                 }
             }
         }
