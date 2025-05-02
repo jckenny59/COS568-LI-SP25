@@ -101,24 +101,12 @@ public:
         pre_operation();
         // For range queries, we need to check both indexes
         uint64_t result = 0;
-        uint64_t value;  // Declare value variable here
         
         // First check LIPP
-        auto lipp_it = lipp_.lower_bound(lower_key);
-        while (lipp_it != lipp_.end() && lipp_it->comp.data.key <= upper_key) {
-            result += lipp_it->comp.data.value;
-            ++lipp_it;
-        }
+        result += lipp_.RangeQuery(lower_key, upper_key, thread_id);
 
         // Then check PGM
-        auto pgm_it = dpgm_.lower_bound(lower_key);
-        while (pgm_it != dpgm_.end() && pgm_it->key() <= upper_key) {
-            // Only add if not already counted from LIPP
-            if (!lipp_.find(pgm_it->key(), value)) {
-                result += pgm_it->value();
-            }
-            ++pgm_it;
-        }
+        result += dpgm_.RangeQuery(lower_key, upper_key, thread_id);
 
         return result;
     }
