@@ -24,7 +24,8 @@ template <class KeyType, class SearchClass, size_t pgm_error>
 class HybridPGMLIPP : public Base<KeyType> {
 public:
     HybridPGMLIPP(const std::vector<int>& params) 
-        : dpgm_(params), lipp_(params), migration_threshold_(0.05), 
+        : dpgm_(params), lipp_(params), migration_threshold_(100), 
+          batch_size_(1000), hot_key_threshold_(5), migration_interval_(1000),
           migration_in_progress_(false), migration_queue_size_(0),
           adaptive_threshold_(true), workload_stats_({0, 0, 0}),
           hot_keys_(), key_access_count_(), last_flush_time_(std::chrono::steady_clock::now()) {
@@ -53,116 +54,74 @@ public:
     }
 
     uint64_t Build(const std::vector<KeyValue<KeyType>>& data, size_t num_threads) {
-        // Initially load all data into DPGM
-        uint64_t build_time = dpgm_.Build(data, num_threads);
-        
-        // Pre-warm LIPP with a smaller sample of keys
-        if (data.size() > 0) {
-            std::vector<KeyValue<KeyType>> initial_hot_keys;
-            size_t sample_size = std::min(data.size(), size_t(100000)); // Reduced to 100K keys
-            
-            // Sample keys from the middle of the data
-            size_t start_idx = data.size() / 2 - sample_size / 2;
-            for (size_t i = 0; i < sample_size; ++i) {
-                initial_hot_keys.push_back(data[start_idx + i]);
-            }
-            
-            // Sort for efficient bulk loading
-            std::sort(initial_hot_keys.begin(), initial_hot_keys.end(),
-                     [](const KeyValue<KeyType>& a, const KeyValue<KeyType>& b) {
-                         return a.key < b.key;
-                     });
-            
-            // Bulk load into LIPP
-            lipp_.Build(initial_hot_keys, 1);
+        // Build both indexes in parallel
+        std::vector<std::pair<KeyType, uint64_t>> loading_data;
+        loading_data.reserve(data.size());
+        for (const auto& itm : data) {
+            loading_data.emplace_back(itm.key, itm.value);
         }
+
+        uint64_t build_time = util::timing([&] {
+            // Build PGM first as it's faster
+            dpgm_.Build(data, num_threads);
+            
+            // Then build LIPP with the same data
+            lipp_.bulk_load(loading_data.data(), loading_data.size());
+        });
         
         return build_time;
     }
 
     size_t EqualityLookup(const KeyType& lookup_key, uint32_t thread_id) const {
-        // First check LIPP for hot keys with atomic check
-        if (!migration_in_progress_.load(std::memory_order_acquire)) {
-            size_t lipp_result = lipp_.EqualityLookup(lookup_key, thread_id);
-            if (lipp_result != util::NOT_FOUND) {
-                workload_stats_.lookups++;
-                return lipp_result;
-            }
+        // First check LIPP for hot keys (no synchronization needed)
+        uint64_t value;
+        if (lipp_.find(lookup_key, value)) {
+            // Key is in LIPP, update its access count
+            update_hot_keys(lookup_key);
+            return value;
         }
-        
-        // If not found in LIPP or migration in progress, check DPGM
-        workload_stats_.lookups++;
-        size_t dpgm_result = dpgm_.EqualityLookup(lookup_key, thread_id);
-        
-        // Update access count and check if key should be migrated
-        if (dpgm_result != util::NOT_FOUND) {
-            // Use try_lock to avoid blocking
-            std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
-            if (lock.owns_lock()) {
-                auto& stats = key_stats_[lookup_key];
-                auto current_time = std::chrono::steady_clock::now().time_since_epoch().count();
-                
-                // Check if this is a recent access (within 50ms)
-                if (current_time - stats.last_access_time < 50000000) { // 50ms
-                    stats.consecutive_accesses++;
-                } else {
-                    stats.consecutive_accesses = 1;
-                }
-                
-                // Update statistics
-                stats.access_count++;
-                stats.total_accesses++;
-                stats.last_access_time = current_time;
-                
-                // More conservative migration decision
-                if (!stats.is_hot && 
-                    stats.consecutive_accesses >= 3 && // Increased threshold
-                    current_time - stats.last_migration_time > 1000000000) { // 1s cooldown
-                    stats.is_hot = true;
-                    stats.last_migration_time = current_time;
-                    
-                    // Add to migration queue if not already there
-                    if (std::find(migration_queue_.begin(), migration_queue_.end(), lookup_key) == migration_queue_.end()) {
-                        migration_queue_.push_back(lookup_key);
-                    }
-                    
-                    // Only trigger migration if we have enough keys
-                    if (migration_queue_.size() >= 500) { // Increased batch size
-                        if (!migration_in_progress_.load(std::memory_order_acquire)) {
-                            const_cast<HybridPGMLIPP*>(this)->StartAsyncMigration();
-                        }
-                    }
-                }
-            }
+
+        // Key not in LIPP, check PGM
+        auto it = dpgm_.find(lookup_key);
+        if (it == dpgm_.end()) {
+            return util::OVERFLOW;
         }
-        
-        return dpgm_result;
+
+        // Key found in PGM, update its access count
+        update_hot_keys(lookup_key);
+        return it->value();
     }
 
     uint64_t RangeQuery(const KeyType& lower_key, const KeyType& upper_key, uint32_t thread_id) const {
         pre_operation();
-        // Combine results from both indexes
-        uint64_t lipp_result = lipp_.RangeQuery(lower_key, upper_key, thread_id);
-        uint64_t dpgm_result = dpgm_.RangeQuery(lower_key, upper_key, thread_id);
-        return lipp_result + dpgm_result;
+        // For range queries, we need to check both indexes
+        uint64_t result = 0;
+        
+        // First check LIPP
+        auto lipp_it = lipp_.lower_bound(lower_key);
+        while (lipp_it != lipp_.end() && lipp_it->comp.data.key <= upper_key) {
+            result += lipp_it->comp.data.value;
+            ++lipp_it;
+        }
+
+        // Then check PGM
+        auto pgm_it = dpgm_.lower_bound(lower_key);
+        while (pgm_it != dpgm_.end() && pgm_it->key() <= upper_key) {
+            // Only add if not already counted from LIPP
+            if (!lipp_.find(pgm_it->key(), value)) {
+                result += pgm_it->value();
+            }
+            ++pgm_it;
+        }
+
+        return result;
     }
 
     void Insert(const KeyValue<KeyType>& kv, uint32_t thread_id) {
         pre_operation();
-        // Optimize insert path by checking if key is already hot
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            auto it = key_stats_.find(kv.key);
-            if (it != key_stats_.end() && it->second.is_hot) {
-                // If key is hot, insert directly into LIPP
-                lipp_.Insert(kv, thread_id);
-                workload_stats_.inserts++;
-                return;
-            }
-        }
-        
-        // Otherwise insert into DPGM
+        // Insert into both indexes
         dpgm_.Insert(kv, thread_id);
+        lipp_.Insert(kv, thread_id);
         workload_stats_.inserts++;
         
         // More frequent migration checks for insert-heavy workloads
@@ -176,18 +135,19 @@ public:
 
     std::string name() const { return "HybridPGMLIPP"; }
 
-    std::size_t size() const { return dpgm_.size() + lipp_.size(); }
+    std::size_t size() const { return dpgm_.size_in_bytes() + lipp_.index_size(); }
 
     bool applicable(bool unique, bool range_query, bool insert, bool multithread, 
                    const std::string& ops_filename) const {
-        return unique && !multithread;
+        std::string name = SearchClass::name();
+        return name != "LinearAVX" && !multithread;
     }
 
     std::vector<std::string> variants() const { 
         std::vector<std::string> vec;
         vec.push_back(SearchClass::name());
         vec.push_back(std::to_string(pgm_error));
-        vec.push_back(std::to_string(static_cast<int>(migration_threshold_ * 100)));
+        vec.push_back(std::to_string(migration_threshold_ * 100));
         vec.push_back(adaptive_threshold_ ? "adaptive" : "fixed");
         return vec;
     }
@@ -228,12 +188,9 @@ private:
     };
 
     struct KeyStats {
-        size_t access_count{0};
-        size_t last_access_time{0};
-        bool is_hot{false};
-        size_t consecutive_accesses{0};
-        size_t total_accesses{0};
-        size_t last_migration_time{0};
+        std::atomic<uint32_t> access_count{0};
+        std::atomic<uint32_t> consecutive_accesses{0};
+        std::chrono::steady_clock::time_point last_access;
     };
 
     bool should_flush() const {
@@ -282,7 +239,7 @@ private:
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 for (const auto& [key, stats] : key_stats_) {
-                    if (now - stats.last_access_time > 250000000) { // 250ms
+                    if (now - stats.last_access.load(std::memory_order_relaxed) > 250000000) { // 250ms
                         keys_to_remove.push_back(key);
                     }
                 }
@@ -340,64 +297,30 @@ private:
     }
 
     void MigrateHotKeys() {
-        if (migration_queue_.empty()) {
-            return;
+        std::vector<std::pair<KeyType, uint64_t>> keys_to_migrate;
+        keys_to_migrate.reserve(batch_size_);
+
+        // Collect hot keys
+        for (const auto& [key, stats] : key_stats_) {
+            if (stats.consecutive_accesses.load(std::memory_order_relaxed) >= hot_key_threshold_) {
+                auto it = dpgm_.find(key);
+                if (it != dpgm_.end()) {
+                    keys_to_migrate.emplace_back(key, it->value());
+                }
+            }
         }
 
-        try {
-            std::vector<KeyValue<KeyType>> keys_to_migrate;
-            std::unordered_set<KeyType> migrated_keys;
+        // Sort keys for better locality
+        std::sort(keys_to_migrate.begin(), keys_to_migrate.end());
+
+        // Bulk load into LIPP
+        if (!keys_to_migrate.empty()) {
+            lipp_.bulk_load(keys_to_migrate.data(), keys_to_migrate.size());
             
-            // Get a snapshot of the migration queue
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (migration_queue_.empty()) {
-                    return;
-                }
-                
-                keys_to_migrate.reserve(migration_queue_.size());
-                
-                for (const auto& key : migration_queue_) {
-                    try {
-                        size_t value = dpgm_.EqualityLookup(key, 0);
-                        if (value != util::NOT_FOUND) {
-                            keys_to_migrate.push_back(KeyValue<KeyType>{key, value});
-                            migrated_keys.insert(key);
-                        }
-                    } catch (const std::exception& e) {
-                        std::cerr << "Error looking up key during migration: " << e.what() << std::endl;
-                        continue;
-                    }
-                }
-                migration_queue_.clear();
+            // Remove migrated keys from PGM
+            for (const auto& [key, _] : keys_to_migrate) {
+                dpgm_.erase(key);
             }
-            
-            if (keys_to_migrate.empty()) {
-                return;
-            }
-            
-            // Sort keys for efficient bulk loading
-            std::sort(keys_to_migrate.begin(), keys_to_migrate.end(),
-                      [](const KeyValue<KeyType>& a, const KeyValue<KeyType>& b) {
-                        return a.key < b.key;
-                      });
-            
-            // Bulk load into LIPP
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                try {
-                    lipp_.Build(keys_to_migrate, 1);
-                    hot_keys_.insert(migrated_keys.begin(), migrated_keys.end());
-                } catch (const std::exception& e) {
-                    std::cerr << "Error during LIPP bulk load: " << e.what() << std::endl;
-                    // Rollback: clear hot keys for failed migration
-                    for (const auto& key : migrated_keys) {
-                        hot_keys_.erase(key);
-                    }
-                }
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "Critical error during migration: " << e.what() << std::endl;
         }
     }
 
@@ -438,6 +361,9 @@ private:
     mutable DynamicPGM<KeyType, SearchClass, pgm_error> dpgm_;
     mutable Lipp<KeyType> lipp_;
     double migration_threshold_;
+    double batch_size_;
+    uint32_t hot_key_threshold_;
+    uint32_t migration_interval_;
     mutable std::atomic<bool> migration_in_progress_;
     mutable std::atomic<size_t> migration_queue_size_;
     bool adaptive_threshold_;
