@@ -59,12 +59,12 @@ public:
         // Initially load all data into DPGM
         uint64_t build_time = dpgm_.Build(data, num_threads);
         
-        // Pre-warm LIPP with frequently accessed keys
+        // Pre-warm LIPP with a smaller sample of keys
         if (data.size() > 0) {
             std::vector<KeyValue<KeyType>> initial_hot_keys;
-            size_t sample_size = std::min(data.size(), size_t(1000000)); // Sample up to 1M keys
+            size_t sample_size = std::min(data.size(), size_t(100000)); // Reduced to 100K keys
             
-            // Sample keys from the middle of the data (often more frequently accessed)
+            // Sample keys from the middle of the data
             size_t start_idx = data.size() / 2 - sample_size / 2;
             for (size_t i = 0; i < sample_size; ++i) {
                 initial_hot_keys.push_back(data[start_idx + i]);
@@ -78,27 +78,6 @@ public:
             
             // Bulk load into LIPP
             lipp_.Build(initial_hot_keys, 1);
-            
-            // Remove these keys from DPGM
-            std::vector<KeyValue<KeyType>> remaining_keys;
-            for (const auto& kv : data) {
-                bool is_hot = false;
-                for (const auto& hot_kv : initial_hot_keys) {
-                    if (kv.key == hot_kv.key) {
-                        is_hot = true;
-                        break;
-                    }
-                }
-                if (!is_hot) {
-                    remaining_keys.push_back(kv);
-                }
-            }
-            
-            // Rebuild DPGM with remaining keys
-            dpgm_ = DynamicPGM<KeyType, SearchClass, pgm_error>(std::vector<int>());
-            if (!remaining_keys.empty()) {
-                dpgm_.Build(remaining_keys, 1);
-            }
         }
         
         return build_time;
