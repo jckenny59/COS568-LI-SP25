@@ -141,7 +141,7 @@ public:
 
     std::string name() const { return "HybridPGMLIPP"; }
 
-    std::size_t size() const { return dpgm_.size_in_bytes() + lipp_.index_size(); }
+    std::size_t size() const { return dpgm_.size() + lipp_.index_size(); }
 
     bool applicable(bool unique, bool range_query, bool insert, bool multithread, 
                    const std::string& ops_filename) const {
