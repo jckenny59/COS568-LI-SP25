@@ -42,7 +42,7 @@ public:
                 while (!stop_worker_) {
                     adjust_migration_threshold();
                     update_hot_keys();
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Reduced sleep time
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
             });
         }
@@ -228,7 +228,7 @@ private:
 
     void MigrateHotKeys() {
         std::vector<KeyValue<KeyType>> keys_to_migrate;
-        std::vector<KeyValue<KeyType>> remaining_keys;
+        std::unordered_set<KeyType> migrated_keys;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             
@@ -237,6 +237,7 @@ private:
                 size_t value = dpgm_.EqualityLookup(key, 0);
                 if (value != util::NOT_FOUND) {
                     keys_to_migrate.push_back(KeyValue<KeyType>{key, value});
+                    migrated_keys.insert(key);
                 }
             }
             
@@ -259,38 +260,10 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             lipp_.Build(keys_to_migrate, 1);
             
-            // Extract all keys from DPGM
-            KeyType min_key = std::numeric_limits<KeyType>::min();
-            KeyType max_key = std::numeric_limits<KeyType>::max();
-            const size_t window_size = 1000000; // Process 1M keys at a time
-            KeyType current_min = min_key;
-            
-            while (current_min <= max_key) {
-                KeyType current_max = std::min(current_min + window_size, max_key);
-                for (KeyType key = current_min; key <= current_max; ++key) {
-                    size_t value = dpgm_.EqualityLookup(key, 0);
-                    if (value != util::NOT_FOUND) {
-                        // Check if this key is not in the migrated set
-                        bool is_migrated = false;
-                        for (const auto& kv : keys_to_migrate) {
-                            if (kv.key == key) {
-                                is_migrated = true;
-                                break;
-                            }
-                        }
-                        if (!is_migrated) {
-                            remaining_keys.push_back(KeyValue<KeyType>{key, value});
-                        }
-                    }
-                }
-                current_min = current_max + 1;
-            }
-            
-            // Rebuild DPGM with remaining keys
-            dpgm_ = DynamicPGM<KeyType, SearchClass, pgm_error>(std::vector<int>());
-            if (!remaining_keys.empty()) {
-                dpgm_.Build(remaining_keys, 1);
-            }
+            // Instead of rebuilding DPGM, we'll just mark the keys as migrated
+            // The keys will still exist in DPGM but will be ignored during lookups
+            // since we check LIPP first
+            hot_keys_.insert(migrated_keys.begin(), migrated_keys.end());
         }
     }
 
