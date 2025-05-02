@@ -53,6 +53,10 @@ public:
             stop_worker_ = true;
             background_worker_.join();
         }
+        // Wait for any ongoing migration to complete
+        while (migration_in_progress_.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
     }
 
     uint64_t Build(const std::vector<KeyValue<KeyType>>& data, size_t num_threads) {
@@ -256,15 +260,18 @@ private:
         std::vector<KeyType> keys_to_remove;
         
         // First collect keys to remove
-        for (const auto& [key, stats] : key_stats_) {
-            if (now - stats.last_access_time > 250000000) { // 250ms
-                keys_to_remove.push_back(key);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (const auto& [key, stats] : key_stats_) {
+                if (now - stats.last_access_time > 250000000) { // 250ms
+                    keys_to_remove.push_back(key);
+                }
             }
-        }
-        
-        // Then remove them
-        for (const auto& key : keys_to_remove) {
-            key_stats_.erase(key);
+            
+            // Then remove them
+            for (const auto& key : keys_to_remove) {
+                key_stats_.erase(key);
+            }
         }
         
         workload_stats_.reset();
@@ -284,27 +291,34 @@ private:
     }
 
     void StartAsyncMigration() {
-        bool expected = false;
-        if (!migration_in_progress_.compare_exchange_strong(expected, true)) {
+        if (migration_in_progress_.load()) {
             return;
         }
-        
-        std::thread migration_thread([this]() {
-            MigrateHotKeys();
+
+        migration_in_progress_.store(true);
+        std::thread([this]() {
+            try {
+                MigrateHotKeys();
+            } catch (const std::exception& e) {
+                std::cerr << "Migration error: " << e.what() << std::endl;
+            }
             migration_in_progress_.store(false);
-            workload_stats_.migrations++;
-            last_flush_time_ = std::chrono::steady_clock::now();
-        });
-        migration_thread.detach();
+        }).detach();
     }
 
     void MigrateHotKeys() {
+        if (migration_queue_.empty()) {
+            return;
+        }
+
         std::vector<KeyValue<KeyType>> keys_to_migrate;
         std::unordered_set<KeyType> migrated_keys;
         
         // Get a snapshot of the migration queue
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            keys_to_migrate.reserve(migration_queue_.size());
+            
             for (const auto& key : migration_queue_) {
                 size_t value = dpgm_.EqualityLookup(key, 0);
                 if (value != util::NOT_FOUND) {
