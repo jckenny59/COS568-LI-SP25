@@ -110,9 +110,10 @@ public:
         dpgm_.Insert(key, value);
     }
 
-    bool applicable(bool unique, const std::string& data_filename) const {
+    bool applicable(bool unique, bool range_query, bool insert, bool multithread, const std::string& ops_filename) const {
         // Exclude LinearAVX as it's not compatible with our hybrid approach
-        return !unique && data_filename.find("LinearAVX") == std::string::npos;
+        std::string name = SearchClass::name();
+        return name != "LinearAVX" && !multithread;
     }
 
     std::string name() const { return "HybridPGMLIPP"; }
@@ -125,9 +126,9 @@ public:
 
     std::string op_func() const { return "hybrid_pgm_lipp"; }
 
-    std::string search_method() const { return "BinarySearch"; }
+    std::string search_method() const { return SearchClass::name(); }
 
-    std::string variant() const { return "16"; }
+    std::string variant() const { return std::to_string(pgm_error); }
 
     bool multithreaded() const { return false; }
 
@@ -171,9 +172,9 @@ private:
     DynamicPGM<KeyType, SearchClass, pgm_error> dpgm_;
 
     // Migration parameters
-    const uint32_t migration_threshold_;
-    const uint32_t batch_size_;
-    const uint32_t hot_key_threshold_;
+    uint32_t migration_threshold_;
+    uint32_t batch_size_;
+    uint32_t hot_key_threshold_;
 
     // Thread-local storage for hot key tracking
     mutable std::vector<std::pair<KeyType, uint64_t>> thread_local_keys_;
