@@ -281,6 +281,52 @@ private:
         }
     }
 
+    void update_hot_keys(const KeyType& key) const {
+        auto now = std::chrono::steady_clock::now();
+        auto& stats = key_stats_[key];
+        
+        // Update access counts with relaxed memory ordering
+        uint32_t old_count = stats.access_count.load(std::memory_order_relaxed);
+        uint32_t old_consecutive = stats.consecutive_accesses.load(std::memory_order_relaxed);
+        
+        // Check if this is a consecutive access
+        auto time_since_last = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - stats.last_access).count();
+        
+        if (time_since_last < 100) { // Consider accesses within 100ms as consecutive
+            stats.consecutive_accesses.store(old_consecutive + 1, std::memory_order_relaxed);
+        } else {
+            stats.consecutive_accesses.store(1, std::memory_order_relaxed);
+        }
+        
+        stats.access_count.store(old_count + 1, std::memory_order_relaxed);
+        stats.last_access = now;
+
+        // Check if we should trigger migration
+        if (old_consecutive + 1 >= hot_key_threshold_) {
+            if (migration_mutex_.try_lock()) {
+                try {
+                    // Adjust thresholds based on workload
+                    if (old_count > migration_threshold_) {
+                        const_cast<HybridPGMLIPP*>(this)->migration_threshold_ = 
+                            std::min(migration_threshold_ * 1.1, 1000.0);
+                        const_cast<HybridPGMLIPP*>(this)->batch_size_ = 
+                            std::min(batch_size_ * 1.2, 10000.0);
+                    }
+                    
+                    // Start migration if not already running
+                    if (!migration_running_.load(std::memory_order_relaxed)) {
+                        const_cast<HybridPGMLIPP*>(this)->StartAsyncMigration();
+                    }
+                } catch (...) {
+                    migration_mutex_.unlock();
+                    throw;
+                }
+                migration_mutex_.unlock();
+            }
+        }
+    }
+
     void StartAsyncMigration() {
         if (migration_in_progress_.load(std::memory_order_acquire)) {
             return;
@@ -387,4 +433,6 @@ private:
     mutable std::chrono::steady_clock::time_point last_flush_time_;
     mutable std::unordered_map<KeyType, KeyStats> key_stats_;
     std::thread migration_thread_;
+    mutable std::mutex migration_mutex_;
+    mutable std::atomic<bool> migration_running_{false};
 }; 
