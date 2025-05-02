@@ -98,13 +98,16 @@ public:
         // Update access count and check if key should be migrated
         if (dpgm_result != util::NOT_FOUND) {
             std::lock_guard<std::mutex> lock(mutex_);
-            key_access_count_[lookup_key]++;
+            auto& stats = key_stats_[lookup_key];
+            stats.access_count++;
+            stats.last_access_time = std::chrono::steady_clock::now().time_since_epoch().count();
             
-            // Lower threshold for faster migration (3 accesses instead of 5)
-            if (key_access_count_[lookup_key] > 3) {
+            // More aggressive migration: migrate after 2 accesses instead of 3
+            if (stats.access_count >= 2 && !stats.is_hot) {
+                stats.is_hot = true;
                 migration_queue_.push_back(lookup_key);
-                // Increased batch size for more efficient migrations
-                if (migration_queue_.size() >= 2000 && !migration_in_progress_.load()) {
+                // Trigger migration more frequently with smaller batches
+                if (migration_queue_.size() >= 1000 && !migration_in_progress_.load()) {
                     const_cast<HybridPGMLIPP*>(this)->StartAsyncMigration();
                 }
             }
@@ -121,12 +124,24 @@ public:
     }
 
     void Insert(const KeyValue<KeyType>& kv, uint32_t thread_id) {
-        // Insert into DPGM first
+        // Optimize insert path by checking if key is already hot
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = key_stats_.find(kv.key);
+            if (it != key_stats_.end() && it->second.is_hot) {
+                // If key is hot, insert directly into LIPP
+                lipp_.Insert(kv, thread_id);
+                workload_stats_.inserts++;
+                return;
+            }
+        }
+        
+        // Otherwise insert into DPGM
         dpgm_.Insert(kv, thread_id);
         workload_stats_.inserts++;
         
-        // Check if we should trigger migration
-        if (workload_stats_.inserts % 500 == 0) { // More frequent checks
+        // More frequent migration checks for insert-heavy workloads
+        if (workload_stats_.inserts % 100 == 0) { // Reduced from 500
             std::lock_guard<std::mutex> lock(mutex_);
             if (should_flush() && !migration_in_progress_.load()) {
                 StartAsyncMigration();
@@ -165,17 +180,27 @@ private:
         }
     };
 
+    struct KeyStats {
+        size_t access_count{0};
+        size_t last_access_time{0};
+        bool is_hot{false};
+    };
+
     bool should_flush() const {
         auto now = std::chrono::steady_clock::now();
         auto time_since_last_flush = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_flush_time_).count();
         
-        // Flush if we have enough hot keys to migrate
-        bool hot_keys_threshold = migration_queue_.size() >= 2000; // Increased batch size
+        // Smarter workload-aware flushing
+        size_t total_ops = workload_stats_.inserts + workload_stats_.lookups;
+        if (total_ops == 0) return false;
         
-        // Flush if enough time has passed since last flush
-        bool time_threshold = time_since_last_flush > 500; // More frequent flushes
+        double insert_ratio = static_cast<double>(workload_stats_.inserts) / total_ops;
         
-        return hot_keys_threshold || time_threshold;
+        // Adjust thresholds based on workload
+        size_t min_batch_size = (insert_ratio > 0.7) ? 500 : 1000; // Smaller batches for insert-heavy
+        size_t max_wait_time = (insert_ratio > 0.7) ? 200 : 500;   // More frequent flushes for insert-heavy
+        
+        return migration_queue_.size() >= min_batch_size || time_since_last_flush > max_wait_time;
     }
 
     void adjust_migration_threshold() {
@@ -186,13 +211,26 @@ private:
 
         double insert_ratio = static_cast<double>(workload_stats_.inserts) / total_ops;
         
-        // More aggressive threshold adjustment based on workload
+        // More sophisticated threshold adjustment
         if (insert_ratio > 0.7) {
-            // Insert-heavy workload: increase threshold more aggressively
-            migration_threshold_ = std::min(0.3, migration_threshold_ * 1.2);
+            // Insert-heavy: be more conservative with migrations
+            migration_threshold_ = std::min(0.2, migration_threshold_ * 1.1);
         } else if (insert_ratio < 0.3) {
-            // Lookup-heavy workload: decrease threshold more aggressively
-            migration_threshold_ = std::max(0.01, migration_threshold_ * 0.8);
+            // Lookup-heavy: be more aggressive with migrations
+            migration_threshold_ = std::max(0.005, migration_threshold_ * 0.9);
+        } else {
+            // Mixed workload: maintain current threshold
+            migration_threshold_ = std::max(0.01, migration_threshold_ * 0.95);
+        }
+        
+        // Clean up old key stats
+        auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+        for (auto it = key_stats_.begin(); it != key_stats_.end();) {
+            if (now - it->second.last_access_time > 1000000000) { // 1 second
+                it = key_stats_.erase(it);
+            } else {
+                ++it;
+            }
         }
         
         workload_stats_.reset();
@@ -283,4 +321,5 @@ private:
     mutable std::unordered_set<KeyType> hot_keys_;
     mutable std::list<KeyType> migration_queue_;
     mutable std::chrono::steady_clock::time_point last_flush_time_;
+    mutable std::unordered_map<KeyType, KeyStats> key_stats_;
 }; 
