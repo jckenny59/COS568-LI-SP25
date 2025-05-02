@@ -96,6 +96,7 @@ public:
         pre_operation();
         // For range queries, we need to check both indexes
         uint64_t result = 0;
+        uint64_t value;  // Declare value variable here
         
         // First check LIPP
         auto lipp_it = lipp_.lower_bound(lower_key);
