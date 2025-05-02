@@ -99,16 +99,19 @@ public:
         if (dpgm_result != util::NOT_FOUND) {
             std::lock_guard<std::mutex> lock(mutex_);
             auto& stats = key_stats_[lookup_key];
-            stats.access_count++;
-            stats.total_accesses++;
-            stats.last_access_time = std::chrono::steady_clock::now().time_since_epoch().count();
+            auto current_time = std::chrono::steady_clock::now().time_since_epoch().count();
             
-            // Increment consecutive accesses if this is a recent access
-            if (stats.last_access_time - stats.last_access_time < 100000000) { // 100ms
+            // Check if this is a recent access (within 100ms)
+            if (current_time - stats.last_access_time < 100000000) { // 100ms
                 stats.consecutive_accesses++;
             } else {
                 stats.consecutive_accesses = 1;
             }
+            
+            // Update statistics
+            stats.access_count++;
+            stats.total_accesses++;
+            stats.last_access_time = current_time;
             
             // Smarter migration decision based on access patterns
             if (!stats.is_hot && 
@@ -119,7 +122,9 @@ public:
                 
                 // Trigger migration if we have enough keys or if this is a very hot key
                 if (migration_queue_.size() >= 500 || stats.consecutive_accesses >= 5) {
-                    const_cast<HybridPGMLIPP*>(this)->StartAsyncMigration();
+                    if (!migration_in_progress_.load()) {
+                        const_cast<HybridPGMLIPP*>(this)->StartAsyncMigration();
+                    }
                 }
             }
         }
@@ -195,8 +200,8 @@ private:
         size_t access_count{0};
         size_t last_access_time{0};
         bool is_hot{false};
-        size_t consecutive_accesses{0};  // Track consecutive accesses
-        size_t total_accesses{0};        // Track total accesses
+        size_t consecutive_accesses{0};
+        size_t total_accesses{0};
     };
 
     bool should_flush() const {
@@ -311,9 +316,7 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             lipp_.Build(keys_to_migrate, 1);
             
-            // Instead of rebuilding DPGM, we'll just mark the keys as migrated
-            // The keys will still exist in DPGM but will be ignored during lookups
-            // since we check LIPP first
+            // Update hot keys set
             hot_keys_.insert(migrated_keys.begin(), migrated_keys.end());
         }
     }
