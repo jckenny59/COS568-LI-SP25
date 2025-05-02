@@ -79,11 +79,11 @@ public:
 
     size_t EqualityLookup(const KeyType& lookup_key, uint32_t thread_id) const {
         // First check LIPP for hot keys (no synchronization needed)
-        uint64_t value;
-        if (lipp_.find(lookup_key, value)) {
+        size_t lipp_result = lipp_.EqualityLookup(lookup_key, thread_id);
+        if (lipp_result != util::NOT_FOUND) {
             // Key is in LIPP, update its access count
             update_hot_keys(lookup_key);
-            return value;
+            return lipp_result;
         }
 
         // Key not in LIPP, check PGM
