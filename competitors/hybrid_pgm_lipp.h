@@ -22,6 +22,8 @@ template <class KeyType, class SearchClass, size_t pgm_error>
 class HybridPGMLIPP : public Base<KeyType> {
 public:
     HybridPGMLIPP(const std::vector<int>& params) : 
+        lipp_(params),
+        dpgm_(params),
         migration_threshold_(100),
         batch_size_(1000),
         hot_key_threshold_(5) {
