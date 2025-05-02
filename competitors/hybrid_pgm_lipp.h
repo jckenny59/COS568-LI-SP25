@@ -81,6 +81,7 @@ public:
     }
 
     size_t EqualityLookup(const KeyType& lookup_key, uint32_t thread_id) const {
+        pre_operation();
         // First check LIPP for hot keys
         size_t lipp_result = lipp_.EqualityLookup(lookup_key, thread_id);
         if (lipp_result != util::NOT_FOUND) {
@@ -139,6 +140,7 @@ public:
     }
 
     uint64_t RangeQuery(const KeyType& lower_key, const KeyType& upper_key, uint32_t thread_id) const {
+        pre_operation();
         // Combine results from both indexes
         uint64_t lipp_result = lipp_.RangeQuery(lower_key, upper_key, thread_id);
         uint64_t dpgm_result = dpgm_.RangeQuery(lower_key, upper_key, thread_id);
@@ -146,6 +148,7 @@ public:
     }
 
     void Insert(const KeyValue<KeyType>& kv, uint32_t thread_id) {
+        pre_operation();
         // Optimize insert path by checking if key is already hot
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -192,6 +195,21 @@ public:
     // Add cleanup before variant switching
     void initSearch() {
         cleanup_resources();
+    }
+
+    // Add cleanup after variant switching
+    void reset() {
+        cleanup_resources();
+    }
+
+    // Add cleanup before each operation
+    void pre_operation() {
+        if (!migration_in_progress_.load()) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (should_flush()) {
+                StartAsyncMigration();
+            }
+        }
     }
 
 private:
@@ -402,6 +420,12 @@ private:
                 key_stats_.clear();
                 key_access_count_.clear();
             }
+
+            // Reset state
+            migration_in_progress_.store(false);
+            stop_worker_ = false;
+            workload_stats_.reset();
+            last_flush_time_ = std::chrono::steady_clock::now();
         } catch (const std::exception& e) {
             std::cerr << "Error during resource cleanup: " << e.what() << std::endl;
         }
