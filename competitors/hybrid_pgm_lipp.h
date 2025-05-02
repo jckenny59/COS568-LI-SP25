@@ -62,54 +62,35 @@ public:
         return build_time;
     }
 
-    size_t EqualityLookup(const KeyType& key, uint64_t& value) const {
+    size_t EqualityLookup(const KeyType& key, uint32_t thread_id) const {
         // First check LIPP for hot keys without synchronization
-        if (lipp_.EqualityLookup(key, value)) {
-            return 1;
+        size_t lipp_result = lipp_.EqualityLookup(key, thread_id);
+        if (lipp_result != util::NOT_FOUND) {
+            return lipp_result;
         }
         
         // If not in LIPP, check PGM
-        if (dpgm_.EqualityLookup(key, value)) {
+        size_t pgm_result = dpgm_.EqualityLookup(key, thread_id);
+        if (pgm_result != util::NOT_FOUND) {
             // Key found in PGM, consider migrating to LIPP
-            const_cast<HybridPGMLIPP*>(this)->consider_migration(key, value);
-            return 1;
+            const_cast<HybridPGMLIPP*>(this)->consider_migration(key, pgm_result);
+            return pgm_result;
         }
         
-        return 0;
+        return util::NOT_FOUND;
     }
 
-    uint64_t RangeQuery(const KeyType& lower_key, const KeyType& upper_key, std::vector<uint64_t>& result) const {
-        uint64_t value;
-        result.clear();
-        
-        // Check both indexes and avoid double counting
-        std::unordered_set<KeyType> processed_keys;
-        
-        // First check LIPP
-        auto lipp_it = lipp_.lower_bound(lower_key);
-        while (lipp_it != lipp_.end() && lipp_it->key() <= upper_key) {
-            if (processed_keys.insert(lipp_it->key()).second) {
-                result.push_back(lipp_it->value());
-            }
-            ++lipp_it;
-        }
-        
-        // Then check PGM
-        auto pgm_it = dpgm_.lower_bound(lower_key);
-        while (pgm_it != dpgm_.end() && pgm_it->key() <= upper_key) {
-            if (processed_keys.insert(pgm_it->key()).second) {
-                result.push_back(pgm_it->value());
-            }
-            ++pgm_it;
-        }
-        
-        return result.size();
+    uint64_t RangeQuery(const KeyType& lower_key, const KeyType& upper_key, uint32_t thread_id) const {
+        // Query both indexes
+        uint64_t result = lipp_.RangeQuery(lower_key, upper_key, thread_id);
+        result += dpgm_.RangeQuery(lower_key, upper_key, thread_id);
+        return result;
     }
 
-    void Insert(const KeyType& key, uint64_t value) {
+    void Insert(const KeyValue<KeyType>& data, uint32_t thread_id) {
         // Insert into both indexes
-        lipp_.Insert(key, value);
-        dpgm_.Insert(key, value);
+        lipp_.Insert(data, thread_id);
+        dpgm_.Insert(data, thread_id);
     }
 
     bool applicable(bool unique, bool range_query, bool insert, bool multithread, const std::string& ops_filename) const {
@@ -158,7 +139,7 @@ private:
                     uint64_t dummy;
                     if (!lipp_.EqualityLookup(key, dummy)) {
                         // Migrate key to LIPP
-                        lipp_.Insert(key, value);
+                        lipp_.Insert(KeyValue<KeyType>{key, value}, 0);
                         stats.is_hot.store(true, std::memory_order_relaxed);
                     }
                 } catch (...) {
