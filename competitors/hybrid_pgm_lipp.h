@@ -238,14 +238,16 @@ private:
             }
             
             // Clean up old key stats more aggressively
-            auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+            auto now = std::chrono::steady_clock::now();
             std::vector<KeyType> keys_to_remove;
             
             // First collect keys to remove
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 for (const auto& [key, stats] : key_stats_) {
-                    if (now - stats.last_access.load(std::memory_order_relaxed) > 250000000) { // 250ms
+                    auto time_since_last = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        now - stats.last_access).count();
+                    if (time_since_last > 250000000) { // 250ms
                         keys_to_remove.push_back(key);
                     }
                 }
