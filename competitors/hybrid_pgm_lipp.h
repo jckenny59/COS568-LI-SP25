@@ -204,6 +204,7 @@ private:
 
     void MigrateHotKeys() {
         std::vector<KeyValue<KeyType>> keys_to_migrate;
+        std::vector<KeyValue<KeyType>> remaining_keys;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             
@@ -233,13 +234,38 @@ private:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             lipp_.Build(keys_to_migrate, 1);
-        }
-        
-        // Remove migrated keys from DPGM
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            for (const auto& kv : keys_to_migrate) {
-                dpgm_.Delete(kv.key, 0);
+            
+            // Extract all keys from DPGM
+            KeyType min_key = std::numeric_limits<KeyType>::min();
+            KeyType max_key = std::numeric_limits<KeyType>::max();
+            const size_t window_size = 1000000; // Process 1M keys at a time
+            KeyType current_min = min_key;
+            
+            while (current_min <= max_key) {
+                KeyType current_max = std::min(current_min + window_size, max_key);
+                for (KeyType key = current_min; key <= current_max; ++key) {
+                    size_t value = dpgm_.EqualityLookup(key, 0);
+                    if (value != util::NOT_FOUND) {
+                        // Check if this key is not in the migrated set
+                        bool is_migrated = false;
+                        for (const auto& kv : keys_to_migrate) {
+                            if (kv.key == key) {
+                                is_migrated = true;
+                                break;
+                            }
+                        }
+                        if (!is_migrated) {
+                            remaining_keys.push_back(KeyValue<KeyType>{key, value});
+                        }
+                    }
+                }
+                current_min = current_max + 1;
+            }
+            
+            // Rebuild DPGM with remaining keys
+            dpgm_ = DynamicPGM<KeyType, SearchClass, pgm_error>(std::vector<int>());
+            if (!remaining_keys.empty()) {
+                dpgm_.Build(remaining_keys, 1);
             }
         }
     }
