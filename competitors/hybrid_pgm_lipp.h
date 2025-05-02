@@ -17,7 +17,7 @@
 #include "dynamic_pgm_index.h"
 #include "../util.h"
 
-template <class KeyType>
+template <class KeyType, class SearchClass, size_t pgm_error>
 class HybridPGMLIPP : public Base<KeyType> {
 public:
     HybridPGMLIPP() : 
@@ -160,7 +160,7 @@ private:
 
     // Indexes
     Lipp<KeyType> lipp_;
-    DynamicPGM<KeyType> dpgm_;
+    DynamicPGM<KeyType, SearchClass, pgm_error> dpgm_;
 
     // Migration parameters
     const uint32_t migration_threshold_;
