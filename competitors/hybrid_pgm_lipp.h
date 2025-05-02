@@ -24,28 +24,9 @@ template <class KeyType, class SearchClass, size_t pgm_error>
 class HybridPGMLIPP : public Base<KeyType> {
 public:
     HybridPGMLIPP(const std::vector<int>& params) 
-        : dpgm_(params), lipp_(params), migration_threshold_(100), 
-          batch_size_(1000), hot_key_threshold_(5), migration_interval_(1000),
-          migration_in_progress_(false), migration_queue_size_(0),
-          adaptive_threshold_(true), workload_stats_({0, 0, 0}),
-          hot_keys_(), key_access_count_(), last_flush_time_(std::chrono::steady_clock::now()) {
-        
+        : dpgm_(params), lipp_(params), hot_key_threshold_(5) {
         if (!params.empty()) {
-            migration_threshold_ = params[0] / 100.0;
-            if (params.size() > 1) {
-                adaptive_threshold_ = (params[1] != 0);
-            }
-        }
-        
-        // Start background workers
-        if (adaptive_threshold_) {
-            background_worker_ = std::thread([this]() {
-                while (!stop_worker_) {
-                    adjust_migration_threshold();
-                    update_hot_keys();
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                }
-            });
+            hot_key_threshold_ = params[0];
         }
     }
 
@@ -78,15 +59,14 @@ public:
     }
 
     size_t EqualityLookup(const KeyType& lookup_key, uint32_t thread_id) const {
-        // First check LIPP for hot keys (no synchronization needed)
+        // First check LIPP for hot keys (fast path)
         size_t lipp_result = lipp_.EqualityLookup(lookup_key, thread_id);
         if (lipp_result != util::NOT_FOUND) {
-            // Key is in LIPP, update its access count
             update_hot_keys(lookup_key);
             return lipp_result;
         }
 
-        // Key not in LIPP, check PGM
+        // Key not in LIPP, check PGM (slow path)
         size_t pgm_result = dpgm_.EqualityLookup(lookup_key, thread_id);
         if (pgm_result == util::NOT_FOUND) {
             return util::OVERFLOW;
@@ -98,32 +78,19 @@ public:
     }
 
     uint64_t RangeQuery(const KeyType& lower_key, const KeyType& upper_key, uint32_t thread_id) const {
-        pre_operation();
-        // For range queries, we need to check both indexes
-        uint64_t result = 0;
-        
-        // First check LIPP
-        result += lipp_.RangeQuery(lower_key, upper_key, thread_id);
-
-        // Then check PGM
+        // Query both indexes
+        uint64_t result = lipp_.RangeQuery(lower_key, upper_key, thread_id);
         result += dpgm_.RangeQuery(lower_key, upper_key, thread_id);
-
         return result;
     }
 
     void Insert(const KeyValue<KeyType>& kv, uint32_t thread_id) {
-        pre_operation();
-        // Insert into both indexes
-        dpgm_.Insert(kv, thread_id);
+        // Always insert into primary index
         lipp_.Insert(kv, thread_id);
-        workload_stats_.inserts++;
         
-        // More frequent migration checks for insert-heavy workloads
-        if (workload_stats_.inserts % 50 == 0) { // Reduced from 100
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (should_flush() && !migration_in_progress_.load()) {
-                StartAsyncMigration();
-            }
+        // Only insert into cold storage if not hot
+        if (hot_keys_.find(kv.key) == hot_keys_.end()) {
+            dpgm_.Insert(kv, thread_id);
         }
     }
 
@@ -141,291 +108,48 @@ public:
         std::vector<std::string> vec;
         vec.push_back(SearchClass::name());
         vec.push_back(std::to_string(pgm_error));
-        vec.push_back(std::to_string(migration_threshold_ * 100));
-        vec.push_back(adaptive_threshold_ ? "adaptive" : "fixed");
+        vec.push_back(std::to_string(hot_key_threshold_));
         return vec;
     }
 
-    // Add cleanup before variant switching
     void initSearch() {
         cleanup_resources();
     }
 
-    // Add cleanup after variant switching
     void reset() {
         cleanup_resources();
     }
 
-    // Add cleanup before each operation
-    void pre_operation() const {
-        // Only check migration if we're not in a critical section
-        if (!migration_in_progress_.load(std::memory_order_acquire)) {
-            // Use try_lock to avoid blocking
-            std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
-            if (lock.owns_lock() && should_flush()) {
-                const_cast<HybridPGMLIPP*>(this)->StartAsyncMigration();
-            }
-        }
-    }
-
 private:
-    struct WorkloadStats {
-        mutable std::atomic<size_t> inserts{0};
-        mutable std::atomic<size_t> lookups{0};
-        mutable std::atomic<size_t> migrations{0};
-
-        void reset() {
-            inserts.store(0);
-            lookups.store(0);
-            migrations.store(0);
-        }
-    };
-
-    struct KeyStats {
-        std::atomic<uint32_t> access_count{0};
-        std::atomic<uint32_t> consecutive_accesses{0};
-        std::chrono::steady_clock::time_point last_access;
-    };
-
-    bool should_flush() const {
-        auto now = std::chrono::steady_clock::now();
-        auto time_since_last_flush = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_flush_time_).count();
-        
-        // Smarter workload-aware flushing
-        size_t total_ops = workload_stats_.inserts + workload_stats_.lookups;
-        if (total_ops == 0) return false;
-        
-        double insert_ratio = static_cast<double>(workload_stats_.inserts) / total_ops;
-        
-        // Adjust thresholds based on workload
-        size_t min_batch_size = (insert_ratio > 0.7) ? 100 : 200;  // Smaller batches for insert-heavy
-        size_t max_wait_time = (insert_ratio > 0.7) ? 50 : 150;    // More frequent flushes for insert-heavy
-        
-        return migration_queue_.size() >= min_batch_size || time_since_last_flush > max_wait_time;
-    }
-
-    void adjust_migration_threshold() {
-        if (!adaptive_threshold_) return;
-
-        try {
-            size_t total_ops = workload_stats_.inserts + workload_stats_.lookups;
-            if (total_ops == 0) return;
-
-            double insert_ratio = static_cast<double>(workload_stats_.inserts) / total_ops;
-            
-            // More sophisticated threshold adjustment
-            if (insert_ratio > 0.7) {
-                // Insert-heavy: be more conservative with migrations
-                migration_threshold_ = std::min(0.1, migration_threshold_ * 1.02);
-            } else if (insert_ratio < 0.3) {
-                // Lookup-heavy: be more aggressive with migrations
-                migration_threshold_ = std::max(0.005, migration_threshold_ * 0.98);
-            } else {
-                // Mixed workload: balanced approach
-                migration_threshold_ = std::max(0.01, migration_threshold_ * 0.99);
-            }
-            
-            // Clean up old key stats more aggressively
-            auto now = std::chrono::steady_clock::now();
-            std::vector<KeyType> keys_to_remove;
-            
-            // First collect keys to remove
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                for (const auto& [key, stats] : key_stats_) {
-                    auto time_since_last = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        now - stats.last_access).count();
-                    if (time_since_last > 250000000) { // 250ms
-                        keys_to_remove.push_back(key);
-                    }
-                }
-                
-                // Then remove them
-                for (const auto& key : keys_to_remove) {
-                    key_stats_.erase(key);
-                }
-            }
-            
-            workload_stats_.reset();
-        } catch (const std::exception& e) {
-            std::cerr << "Error adjusting migration threshold: " << e.what() << std::endl;
-        }
-    }
-
-    void update_hot_keys() {
-        try {
-            std::lock_guard<std::mutex> lock(mutex_);
-            
-            // Clear old access counts
-            key_access_count_.clear();
-            
-            // Update hot keys set
-            hot_keys_.clear();
-            for (const auto& key : migration_queue_) {
-                hot_keys_.insert(key);
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "Error updating hot keys: " << e.what() << std::endl;
-        }
-    }
-
     void update_hot_keys(const KeyType& key) const {
-        auto now = std::chrono::steady_clock::now();
-        auto& stats = key_stats_[key];
+        static thread_local std::unordered_map<KeyType, uint32_t> local_counts;
+        static thread_local uint32_t total_ops = 0;
         
-        // Update access counts with relaxed memory ordering
-        uint32_t old_count = stats.access_count.load(std::memory_order_relaxed);
-        uint32_t old_consecutive = stats.consecutive_accesses.load(std::memory_order_relaxed);
+        // Update local counter
+        local_counts[key]++;
+        total_ops++;
         
-        // Check if this is a consecutive access
-        auto time_since_last = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - stats.last_access).count();
-        
-        if (time_since_last < 100) { // Consider accesses within 100ms as consecutive
-            stats.consecutive_accesses.store(old_consecutive + 1, std::memory_order_relaxed);
-        } else {
-            stats.consecutive_accesses.store(1, std::memory_order_relaxed);
-        }
-        
-        stats.access_count.store(old_count + 1, std::memory_order_relaxed);
-        stats.last_access = now;
-
-        // Check if we should trigger migration
-        if (old_consecutive + 1 >= hot_key_threshold_) {
-            if (migration_mutex_.try_lock()) {
-                try {
-                    // Adjust thresholds based on workload
-                    if (old_count > migration_threshold_) {
-                        const_cast<HybridPGMLIPP*>(this)->migration_threshold_ = 
-                            std::min(migration_threshold_ * 1.1, 1000.0);
-                        const_cast<HybridPGMLIPP*>(this)->batch_size_ = 
-                            std::min(batch_size_ * 1.2, 10000.0);
-                    }
-                    
-                    // Start migration if not already running
-                    if (!migration_running_.load(std::memory_order_relaxed)) {
-                        const_cast<HybridPGMLIPP*>(this)->StartAsyncMigration();
-                    }
-                } catch (...) {
-                    migration_mutex_.unlock();
-                    throw;
-                }
-                migration_mutex_.unlock();
-            }
-        }
-    }
-
-    void StartAsyncMigration() {
-        if (migration_in_progress_.load(std::memory_order_acquire)) {
-            return;
-        }
-
-        try {
-            migration_in_progress_.store(true, std::memory_order_release);
-            // Store the thread handle to ensure proper cleanup
-            migration_thread_ = std::thread([this]() {
-                try {
-                    MigrateHotKeys();
-                } catch (const std::exception& e) {
-                    std::cerr << "Migration thread error: " << e.what() << std::endl;
-                }
-                migration_in_progress_.store(false, std::memory_order_release);
-            });
-            migration_thread_.detach();
-        } catch (const std::exception& e) {
-            std::cerr << "Error starting migration thread: " << e.what() << std::endl;
-            migration_in_progress_.store(false, std::memory_order_release);
-        }
-    }
-
-    void MigrateHotKeys() {
-        std::vector<std::pair<KeyType, uint64_t>> keys_to_migrate;
-        keys_to_migrate.reserve(batch_size_);
-
-        // Collect hot keys
-        for (const auto& [key, stats] : key_stats_) {
-            if (stats.consecutive_accesses.load(std::memory_order_relaxed) >= hot_key_threshold_) {
-                size_t value = dpgm_.EqualityLookup(key, 0);
-                if (value != util::NOT_FOUND) {
-                    keys_to_migrate.emplace_back(key, value);
+        // Periodically sync with global state
+        if (total_ops > 1000) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (const auto& [k, count] : local_counts) {
+                if (count > hot_key_threshold_) {
+                    hot_keys_.insert(k);
                 }
             }
-        }
-
-        // Sort keys for better locality
-        std::sort(keys_to_migrate.begin(), keys_to_migrate.end());
-
-        // Bulk load into LIPP
-        if (!keys_to_migrate.empty()) {
-            std::vector<KeyValue<KeyType>> lipp_data;
-            lipp_data.reserve(keys_to_migrate.size());
-            for (const auto& [key, value] : keys_to_migrate) {
-                lipp_data.push_back({key, value});
-            }
-            lipp_.Build(lipp_data, 1);
-            
-            // Mark keys as migrated in our tracking
-            for (const auto& [key, _] : keys_to_migrate) {
-                key_stats_.erase(key);
-            }
+            local_counts.clear();
+            total_ops = 0;
         }
     }
 
     void cleanup_resources() {
-        try {
-            // Stop background worker
-            if (adaptive_threshold_) {
-                stop_worker_ = true;
-                if (background_worker_.joinable()) {
-                    background_worker_.join();
-                }
-            }
-            
-            // Wait for any ongoing migration to complete
-            while (migration_in_progress_.load(std::memory_order_acquire)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-            
-            // Clear all data structures
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                migration_queue_.clear();
-                hot_keys_.clear();
-                key_stats_.clear();
-                key_access_count_.clear();
-            }
-
-            // Reset state
-            migration_in_progress_.store(false, std::memory_order_release);
-            stop_worker_ = false;
-            workload_stats_.reset();
-            last_flush_time_ = std::chrono::steady_clock::now();
-        } catch (const std::exception& e) {
-            std::cerr << "Error during resource cleanup: " << e.what() << std::endl;
-        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        hot_keys_.clear();
     }
 
     mutable DynamicPGM<KeyType, SearchClass, pgm_error> dpgm_;
     mutable Lipp<KeyType> lipp_;
-    double migration_threshold_;
-    double batch_size_;
     uint32_t hot_key_threshold_;
-    uint32_t migration_interval_;
-    mutable std::atomic<bool> migration_in_progress_;
-    mutable std::atomic<size_t> migration_queue_size_;
-    bool adaptive_threshold_;
     mutable std::mutex mutex_;
-    std::thread background_worker_;
-    std::atomic<bool> stop_worker_{false};
-    mutable WorkloadStats workload_stats_;
-    
-    // Improved data structures for tracking hot keys
-    mutable std::unordered_map<KeyType, size_t> key_access_count_;
     mutable std::unordered_set<KeyType> hot_keys_;
-    mutable std::list<KeyType> migration_queue_;
-    mutable std::chrono::steady_clock::time_point last_flush_time_;
-    mutable std::unordered_map<KeyType, KeyStats> key_stats_;
-    std::thread migration_thread_;
-    mutable std::mutex migration_mutex_;
-    mutable std::atomic<bool> migration_running_{false};
 }; 
