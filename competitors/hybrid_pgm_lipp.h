@@ -36,6 +36,29 @@ public:
         migration_thread_ready_cv_ = std::make_unique<std::condition_variable>();
     }
 
+    HybridPGMLIPP(const std::vector<int>& params) : 
+        lipp_(params),
+        dpgm_(params) {
+        // Initialize with more aggressive thresholds
+        migration_threshold_ = 50;  // Lower threshold to migrate more keys
+        batch_size_ = 500;         // Smaller batches for more frequent migrations
+        hot_key_threshold_ = 3;    // Lower threshold to detect hot keys faster
+        migration_in_progress_ = false;
+        migration_thread_ = nullptr;
+        migration_thread_running_ = false;
+        migration_thread_ready_ = false;
+        migration_thread_mutex_ = std::make_unique<std::mutex>();
+        migration_thread_cv_ = std::make_unique<std::condition_variable>();
+        migration_thread_ready_cv_ = std::make_unique<std::condition_variable>();
+
+        // Parse parameters if provided
+        if (!params.empty()) {
+            if (params.size() >= 1) migration_threshold_ = params[0];
+            if (params.size() >= 2) hot_key_threshold_ = params[1];
+            if (params.size() >= 3) batch_size_ = params[2];
+        }
+    }
+
     uint64_t Build(const std::vector<KeyValue<KeyType>>& data, size_t num_threads) {
         // Build PGM first as it's faster
         uint64_t build_time = util::timing([&] {
