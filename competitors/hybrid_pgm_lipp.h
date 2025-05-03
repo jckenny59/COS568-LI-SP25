@@ -24,39 +24,22 @@ public:
     HybridPGMLIPP(const std::vector<int>& params) : 
         lipp_(params),
         dpgm_(params),
-        migration_threshold_(100),
-        batch_size_(1000),
-        hot_key_threshold_(5) {
+        migration_threshold_(50),  // More aggressive migration
+        hot_key_threshold_(3) {    // Lower threshold for hot keys
         // Initialize thread-local storage for hot key tracking
         thread_local_keys_.reserve(1000);
         
         // Parse parameters if provided
         if (!params.empty()) {
             if (params.size() >= 1) migration_threshold_ = params[0];
-            if (params.size() >= 2) batch_size_ = params[1];
-            if (params.size() >= 3) hot_key_threshold_ = params[2];
+            if (params.size() >= 2) hot_key_threshold_ = params[1];
         }
     }
 
     uint64_t Build(const std::vector<KeyValue<KeyType>>& data, size_t num_threads) {
-        // Build both indexes in parallel
-        std::vector<std::pair<KeyType, uint64_t>> loading_data;
-        loading_data.reserve(data.size());
-        for (const auto& itm : data) {
-            loading_data.emplace_back(itm.key, itm.value);
-        }
-
+        // Build PGM first as it's faster
         uint64_t build_time = util::timing([&] {
-            // Build PGM first as it's faster
             dpgm_.Build(data, num_threads);
-            
-            // Then build LIPP with the same data
-            std::vector<KeyValue<KeyType>> lipp_data;
-            lipp_data.reserve(data.size());
-            for (const auto& [key, value] : loading_data) {
-                lipp_data.push_back({key, value});
-            }
-            lipp_.Build(lipp_data, num_threads);
         });
         
         return build_time;
@@ -88,9 +71,14 @@ public:
     }
 
     void Insert(const KeyValue<KeyType>& data, uint32_t thread_id) {
-        // Insert into both indexes
-        lipp_.Insert(data, thread_id);
+        // Insert into PGM first
         dpgm_.Insert(data, thread_id);
+        
+        // Check if key should be in LIPP
+        KeyStats& stats = key_stats_[data.key];
+        if (stats.access_count.load(std::memory_order_relaxed) >= hot_key_threshold_) {
+            lipp_.Insert(data, thread_id);
+        }
     }
 
     bool applicable(bool unique, bool range_query, bool insert, bool multithread, const std::string& ops_filename) const {
@@ -131,7 +119,7 @@ private:
         uint32_t consecutive = stats.consecutive_accesses.fetch_add(1, std::memory_order_relaxed) + 1;
         
         // Check if key should be migrated to LIPP
-        if (count >= migration_threshold_ && consecutive >= hot_key_threshold_) {
+        if (count >= migration_threshold_ || consecutive >= hot_key_threshold_) {
             // Try to acquire migration lock
             if (migration_mutex_.try_lock()) {
                 try {
@@ -156,7 +144,6 @@ private:
 
     // Migration parameters
     uint32_t migration_threshold_;
-    uint32_t batch_size_;
     uint32_t hot_key_threshold_;
 
     // Thread-local storage for hot key tracking
