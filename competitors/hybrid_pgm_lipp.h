@@ -111,9 +111,8 @@ public:
 
         if (is_hot) {
             // Try to insert into LIPP first
-            if (lipp_.Insert(data, thread_id)) {
-                return;
-            }
+            lipp_.Insert(data, thread_id);
+            return;
         }
 
         // Fall back to PGM
@@ -144,9 +143,8 @@ public:
 
         if (is_hot) {
             // Try to insert into LIPP first
-            if (lipp_.Insert(KeyValue<KeyType>{key, value}, 0)) {
-                return;
-            }
+            lipp_.Insert(KeyValue<KeyType>{key, value}, 0);
+            return;
         }
 
         // Fall back to PGM
