@@ -93,9 +93,42 @@ public:
         return result;
     }
 
+    void Insert(const KeyValue<KeyType>& data, uint32_t thread_id) {
+        // First try LIPP for hot keys
+        if (lipp_.EqualityLookup(data.key, data.value)) {
+            return;  // Key already in LIPP
+        }
+
+        // Check if key is hot
+        auto& stats = key_stats_[data.key];
+        uint64_t current_count = stats.access_count.fetch_add(1, std::memory_order_relaxed);
+        uint64_t current_consecutive = stats.consecutive_accesses.fetch_add(1, std::memory_order_relaxed);
+        
+        // More aggressive hot key detection
+        bool is_hot = (current_count >= hot_key_threshold_) || 
+                     (current_consecutive >= 2) ||  // Consider keys accessed twice in a row as hot
+                     (current_count >= 2 && current_consecutive >= 1);  // Consider keys with 2+ total accesses and 1+ consecutive as hot
+
+        if (is_hot) {
+            // Try to insert into LIPP first
+            if (lipp_.Insert(data, thread_id)) {
+                return;
+            }
+        }
+
+        // Fall back to PGM
+        dpgm_.Insert(data, thread_id);
+
+        // Check if we should trigger migration
+        if (!migration_in_progress_.load(std::memory_order_relaxed) && 
+            key_stats_.size() >= migration_threshold_) {
+            TriggerMigration();
+        }
+    }
+
     void Insert(const KeyType& key, uint64_t value) {
         // First try LIPP for hot keys
-        if (lipp_.find(key, value)) {
+        if (lipp_.EqualityLookup(key, value)) {
             return;  // Key already in LIPP
         }
 
@@ -111,13 +144,13 @@ public:
 
         if (is_hot) {
             // Try to insert into LIPP first
-            if (lipp_.insert(key, value)) {
+            if (lipp_.Insert(KeyValue<KeyType>{key, value}, 0)) {
                 return;
             }
         }
 
         // Fall back to PGM
-        dpgm_.insert(key, value);
+        dpgm_.Insert(KeyValue<KeyType>{key, value}, 0);
 
         // Check if we should trigger migration
         if (!migration_in_progress_.load(std::memory_order_relaxed) && 
