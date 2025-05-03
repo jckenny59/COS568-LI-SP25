@@ -293,9 +293,13 @@ private:
                     // Build LIPP with hot keys
                     lipp_.Build(lipp_data, 1);
                     
-                    // Remove migrated keys from PGM
+                    // Note: We can't remove keys from PGM, so we'll just mark them as migrated
+                    // in our stats to avoid re-migration
                     for (const auto& [key, _] : hot_keys) {
-                        dpgm_.remove(key);
+                        auto it = key_stats_.find(key);
+                        if (it != key_stats_.end()) {
+                            it->second.is_hot.store(true, std::memory_order_relaxed);
+                        }
                     }
                 }
 
