@@ -261,7 +261,7 @@ private:
                     if (stats.access_count.load(std::memory_order_relaxed) >= hot_key_threshold_ ||
                         stats.consecutive_accesses.load(std::memory_order_relaxed) >= 2) {
                         uint64_t value;
-                        if (dpgm_.lookup(key, value)) {
+                        if (dpgm_.EqualityLookup(key, value) != util::NOT_FOUND) {
                             hot_keys.emplace_back(key, value);
                         }
                     }
@@ -274,7 +274,7 @@ private:
                         
                         if (stats.access_count.load(std::memory_order_relaxed) >= 2) {
                             uint64_t value;
-                            if (dpgm_.lookup(key, value)) {
+                            if (dpgm_.EqualityLookup(key, value) != util::NOT_FOUND) {
                                 hot_keys.emplace_back(key, value);
                             }
                         }
