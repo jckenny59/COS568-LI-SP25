@@ -1,0 +1,5 @@
+index_name,build_time_ns1,build_time_ns2,build_time_ns3,index_size_bytes,mixed_throughput_mops1,mixed_throughput_mops2,mixed_throughput_mops3,search_method,value
+LIPP,11351220,8751033,5383611,11818375200,6.31531,5.57657,5.67246
+DynamicPGM,3758929,3763045,3738735,1703431048,0.987254,0.970581,0.990807,LinearSearch,32
+DynamicPGM,2939390,2931529,2930319,1700049808,0.963739,0.966811,0.954764,InterpolationSearch,128
+DynamicPGM,2845658,2829370,2836738,1700010908,0.940169,0.941444,0.935598,InterpolationSearch,256
