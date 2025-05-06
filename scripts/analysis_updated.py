@@ -162,18 +162,14 @@ def plot_throughput(data, workload, ax):
                 ha='center', va='bottom', fontsize=9)
 
 def plot_index_size(data, workload, ax):
-    print(f"\n=== Plotting Index Size for {workload} ===")
     # Filter data for specific workload
     workload_data = data[data['workload'] == workload]
-    print(f"Rows in workload data: {len(workload_data)}")
     
     if workload_data.empty:
-        print(f"No data found for workload: {workload}")
         return
     
     # Get unique indexes
     indexes = workload_data['index_name'].unique()
-    print("Indexes in workload:", indexes)
     
     # Get index sizes
     sizes = []
@@ -193,17 +189,12 @@ def plot_index_size(data, workload, ax):
             if np.isfinite(size_mb):
                 sizes.append(size_mb)
                 valid_indexes.append(idx)
-                print(f"Added {idx} with size {size_mb:.2f} MB")
         except Exception as e:
             print(f"Error processing index {idx} for workload {workload}: {str(e)}")
             continue
     
     if not valid_indexes:
-        print(f"No valid size data for workload: {workload}")
         return
-    
-    print(f"Final valid indexes for plotting: {valid_indexes}")
-    print(f"Final size values: {sizes}")
     
     # Create bar plot
     colors = {
@@ -232,7 +223,7 @@ def main():
         
         # Create figure with subplots
         fig, axes = plt.subplots(4, 2, figsize=(15, 20))
-        fig.suptitle('Facebook Dataset Performance Comparison\nHybridPGMLIPP vs DynamicPGM vs LIPP', fontsize=16, y=0.99)
+        fig.suptitle('Facebook Dataset Performance Comparison\nHybridPGMLIPP vs DynamicPGM vs LIPP', fontsize=16, y=0.95)
         
         # Define workloads
         workloads = ['lookup_only', 'insert_lookup', 'mixed_90_insert', 'mixed_10_insert']
@@ -250,12 +241,6 @@ def main():
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         print(f"Plot saved to: {output_path}")
         plt.close()
-        
-        # Save the processed data to CSV
-        output_csv_path = os.path.join(script_dir, 'results', 'result_analysis.csv')
-        data.to_csv(output_csv_path, index=False)
-        print(f"Data saved to: {output_csv_path}")
-        
     except Exception as e:
         print(f"Error in main: {str(e)}")
 
